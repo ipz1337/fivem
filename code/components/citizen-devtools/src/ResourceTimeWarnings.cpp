@@ -14,6 +14,7 @@
 
 #include <CfxLocale.h>
 
+#include <ResourceManager.h>
 #include "ResourceMonitor.h"
 
 DLL_IMPORT ImFont* GetConsoleFontTiny();
@@ -150,6 +151,35 @@ static TThreadStack* GetThread()
 	return &g_threadStack;
 }
 
+#pragma comment(lib, "version.lib")
+
+#define STOPPED_RESPONDING_MESSAGE(x) \
+	"FiveM has stopped responding " x "\nThe game stopped responding for too long and needs to be restarted. When asking for help, please click 'Save information' and upload the file that is saved when you click the button.%s"
+
+static void __declspec(noinline) StoppedRespondingNVIDIA(const std::string& reasoning)
+{
+	FatalError(STOPPED_RESPONDING_MESSAGE("(NVIDIA drivers)"), reasoning);
+}
+
+static void __declspec(noinline) StoppedRespondingScripts(const std::string& reasoning)
+{
+	FatalError(STOPPED_RESPONDING_MESSAGE("(script deadloop)"), reasoning);
+}
+
+static void __declspec(noinline) StoppedRespondingRenderQuery(const std::string& reasoning)
+{
+	FatalError(STOPPED_RESPONDING_MESSAGE("(DirectX query)"), reasoning);
+}
+
+static void __declspec(noinline) StoppedRespondingGeneric(const std::string& reasoning)
+{
+	FatalError(STOPPED_RESPONDING_MESSAGE(""), reasoning);
+}
+
+#ifdef GTA_FIVE
+extern DLL_IMPORT bool IsInRenderQuery();
+#endif
+
 static HookFunction hookFunctionGameTime([]()
 {
 	InputHook::DeprecatedOnWndProc.Connect([](HWND, UINT uMsg, WPARAM, LPARAM, bool&, LRESULT&)
@@ -191,18 +221,18 @@ static HookFunction hookFunctionGameTime([]()
 		},
 		100);
 
-		resource->OnTick.Connect([resourceName]()
+		resource->OnActivate.Connect([resourceName]()
 		{
 			auto th = GetThread();
 
 			if (th)
 			{
-				th->push_front(fmt::sprintf("%s: tick", resourceName));
+				th->push_front(fmt::sprintf("%s: activated", resourceName));
 			}
 		},
 		INT32_MIN);
 
-		resource->OnTick.Connect([]()
+		resource->OnDeactivate.Connect([]()
 		{
 			auto th = GetThread();
 
@@ -230,6 +260,8 @@ static HookFunction hookFunctionGameTime([]()
 				if (lastPeekMessage.count() > 0 && (now - lastPeekMessage) > 45s && (now - lastPeekMessage) < 90s)
 				{
 					std::string reasoning;
+					bool scripts = false;
+					bool renderQuery = false;
 
 					if (!g_threadStack.empty())
 					{
@@ -244,7 +276,53 @@ static HookFunction hookFunctionGameTime([]()
 
 						s << "root";
 
-						reasoning = fmt::sprintf("\n\nScript stack: %s", s.str());
+						reasoning = fmt::sprintf("\n\nThis is likely caused by a resource/script, the script stack is as follows: %s", s.str());
+						scripts = true;
+					}
+
+#ifdef GTA_FIVE
+					if (IsInRenderQuery())
+					{
+						reasoning += fmt::sprintf("\n\nGame code was waiting for the GPU to complete the last frame, but this timed out (the GPU got stuck?) - this could be caused by bad assets or graphics mods.");
+						renderQuery = true;
+					}
+#endif
+
+					bool nvidia = false;
+
+					if (auto nvDLL = GetModuleHandleW(L"nvwgf2umx.dll"); nvDLL && reasoning.empty())
+					{
+						wchar_t nvDllPath[MAX_PATH];
+						GetModuleFileNameW(nvDLL, nvDllPath, std::size(nvDllPath));
+
+						DWORD versionInfoSize = GetFileVersionInfoSize(nvDllPath, nullptr);
+
+						if (versionInfoSize)
+						{
+							std::vector<uint8_t> versionInfo(versionInfoSize);
+
+							if (GetFileVersionInfo(nvDllPath, 0, versionInfo.size(), &versionInfo[0]))
+							{
+								void* fixedInfoBuffer;
+								UINT fixedInfoSize;
+
+								VerQueryValue(&versionInfo[0], L"\\", &fixedInfoBuffer, &fixedInfoSize);
+
+								VS_FIXEDFILEINFO* fixedInfo = reinterpret_cast<VS_FIXEDFILEINFO*>(fixedInfoBuffer);
+
+								// convert versions like 30.0.14.9649 to a decimal like 49649
+								uint32_t nvidiaVersion = (fixedInfo->dwFileVersionLS & 0xFFFF) + (((fixedInfo->dwFileVersionLS >> 16) % 10) * 10000);
+
+								if (nvidiaVersion >= 47200 && nvidiaVersion <= 49710)
+								{
+									nvidia = true;
+
+									reasoning += fmt::sprintf("\n\nThis may be related to a known issue in your NVIDIA GeForce drivers (version %03d.%02d). Downgrade to version 471.68 or below (https://www.nvidia.com/en-us/geforce/drivers/), or disable any overlays/graphics mods (such as Steam or ENBSeries) to fix this.",
+										nvidiaVersion / 100,
+										nvidiaVersion % 100);
+								}
+							}
+						}
 					}
 
 					auto unresponsiveFor = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPeekMessage).count() / 1000.0;
@@ -259,9 +337,20 @@ static HookFunction hookFunctionGameTime([]()
 
 					if (!launch::IsSDKGuest())
 					{
-						FatalError("FiveM has stopped responding\nThe game stopped responding for %.1f seconds and needs to be restarted. Information on this hang is currently being uploaded.%s",
-						unresponsiveFor,
-						reasoning);
+						if (scripts)
+						{
+							StoppedRespondingScripts(reasoning);
+						}
+						else if (renderQuery)
+						{
+							StoppedRespondingRenderQuery(reasoning);
+						}
+						else if (nvidia)
+						{
+							StoppedRespondingNVIDIA(reasoning);
+						}
+
+						StoppedRespondingGeneric(reasoning);
 					}
 				}
 			}
@@ -273,7 +362,8 @@ static HookFunction hookFunctionGameTime([]()
 
 static InitFunction initFunction([]()
 {
-	static auto* resourceMonitor = fx::ResourceMonitor::GetCurrent();
+	static std::shared_mutex gResourceMonitorMutex;
+	static std::shared_ptr<fx::ResourceMonitor> gResourceMonitor;
 
 	static bool resourceTimeWarningShown;
 	static std::chrono::microseconds warningLastShown;
@@ -283,6 +373,39 @@ static InitFunction initFunction([]()
 	static bool taskMgrEnabled;
 
 	static ConVar<bool> taskMgrVar("resmon", ConVar_Archive, false, &taskMgrEnabled);
+
+	fx::ResourceManager::OnInitializeInstance.Connect([](fx::ResourceManager* manager)
+	{
+		manager->OnTick.Connect([]()
+		{
+			bool hadMonitor = false;
+
+			{
+				std::shared_lock _(gResourceMonitorMutex);
+				hadMonitor = gResourceMonitor.get() != nullptr;
+			}
+
+			// #TODO: SDK should explicitly notify the resource monitor is opened
+			if (taskMgrEnabled || launch::IsSDKGuest())
+			{
+				if (!hadMonitor)
+				{
+					std::unique_lock _(gResourceMonitorMutex);
+					gResourceMonitor = std::make_shared<fx::ResourceMonitor>();
+
+					gResourceMonitor->SetShouldGetMemory(true);
+				}
+			}
+			else
+			{
+				if (hadMonitor)
+				{
+					std::unique_lock _(gResourceMonitorMutex);
+					gResourceMonitor = {};
+				}
+			}
+		}, INT32_MIN);
+	});
 
 	fx::ResourceMonitor::OnWarning.Connect([](const std::string& warningText)
 	{
@@ -364,11 +487,15 @@ static InitFunction initFunction([]()
 		}
 #endif
 
-		// #TODO: SDK should explicitly notify the resource monitor is opened
-		resourceMonitor->SetShouldGetMemory(taskMgrEnabled || launch::IsSDKGuest());
+		std::shared_ptr<fx::ResourceMonitor> resourceMonitor;
+
+		{
+			std::shared_lock _(gResourceMonitorMutex);
+			resourceMonitor = gResourceMonitor;
+		}
 
 #ifndef IS_FXSERVER
-		if (launch::IsSDKGuest())
+		if (launch::IsSDKGuest() && resourceMonitor)
 		{
 			const auto& resourceDatas = resourceMonitor->GetResourceDatas();
 
@@ -394,13 +521,14 @@ static InitFunction initFunction([]()
 		}
 #endif
 
-		if (taskMgrEnabled)
+		if (taskMgrEnabled && resourceMonitor)
 		{
-			if (ImGui::Begin("Resource Monitor", &taskMgrEnabled) && ImGui::BeginTable("##resmon", 5, ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Sortable))
+			if (ImGui::Begin("Resource Monitor", &taskMgrEnabled) && ImGui::BeginTable("##resmon", 6, ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Sortable))
 			{
 				ImGui::TableSetupColumn("Resource");
 				ImGui::TableSetupColumn("CPU msec", ImGuiTableColumnFlags_PreferSortDescending);
 				ImGui::TableSetupColumn("Time %", ImGuiTableColumnFlags_PreferSortDescending);
+				ImGui::TableSetupColumn("CPU (inclusive)", ImGuiTableColumnFlags_PreferSortDescending);
 				ImGui::TableSetupColumn("Memory", ImGuiTableColumnFlags_PreferSortDescending);
 				ImGui::TableSetupColumn("Streaming", ImGuiTableColumnFlags_PreferSortDescending);
 				ImGui::TableHeadersRow();
@@ -457,7 +585,7 @@ static InitFunction initFunction([]()
 
 							for (int n = 0; n < sortSpecs->SpecsCount; n++)
 							{
-								const ImGuiTableSortSpecsColumn* sortSpec = &sortSpecs->Specs[n];
+								const ImGuiTableColumnSortSpecs* sortSpec = &sortSpecs->Specs[n];
 								int delta = 0;
 								switch (sortSpec->ColumnIndex)
 								{
@@ -471,10 +599,10 @@ static InitFunction initFunction([]()
 										delta = compare(std::get<2>(left), std::get<2>(right));
 										break;
 									case 3:
-										delta = compare(std::get<3>(left), std::get<3>(right));
+										delta = compare(std::get<6>(left), std::get<6>(right));
 										break;
 									case 4:
-										delta = compare(std::get<4>(left), std::get<4>(right));
+										delta = compare(std::get<3>(left), std::get<3>(right));
 										break;
 								}
 								if (delta > 0)
@@ -488,7 +616,7 @@ static InitFunction initFunction([]()
 					}
 				}
 
-				for (const auto& [resourceName, avgTickMs, avgFrameFraction, memorySize, streamingUsage, recentTicks] : resourceDatas)
+				for (const auto& [resourceName, avgTickMs, avgFrameFraction, memorySize, streamingUsage, recentTicks, avgTotalMs, recentTotals] : resourceDatas)
 				{
 					ImGui::TableNextRow();
 
@@ -499,7 +627,7 @@ static InitFunction initFunction([]()
 
 					if (avgTickMs >= 0.0)
 					{
-						using TTick = decltype(recentTicks.get().tickTimes);
+						using TTick = decltype(recentTicks->tickTimes);
 						static constexpr const size_t sampleCount = 2;
 
 						ImGui::TextColored(GetColorForRange(1.0f, 8.0f, avgTickMs), "%.2f ms", avgTickMs);
@@ -521,9 +649,9 @@ static InitFunction initFunction([]()
 
 							return curSample / float(sampleCount);
 						},
-						(void*)recentTicks.get().tickTimes,
+						(void*)recentTicks->tickTimes,
 						std::size(TTick{}) / sampleCount,
-						recentTicks.get().curTickTime / sampleCount,
+						*recentTicks->curTickTime / sampleCount,
 						nullptr,
 						0.0f,
 						2.5f,
@@ -549,6 +677,17 @@ static InitFunction initFunction([]()
 					}
 
 					ImGui::TableSetColumnIndex(3);
+
+					if (avgTotalMs >= 0.0)
+					{
+						ImGui::TextColored(GetColorForRange(1.0f, 8.0f, avgTotalMs), "%.2f ms", avgTotalMs);
+					}
+					else
+					{
+						ImGui::Text("-");
+					}
+
+					ImGui::TableSetColumnIndex(4);
 
 					int64_t totalBytes = memorySize;
 
@@ -576,7 +715,7 @@ static InitFunction initFunction([]()
 						ImGui::Text("%s+", humanSize.c_str());
 					}
 
-					ImGui::TableSetColumnIndex(4);
+					ImGui::TableSetColumnIndex(5);
 
 					if (streamingUsage > 0)
 					{

@@ -7,6 +7,7 @@
 
 #include "StdInc.h"
 #include <Error.h>
+
 #include "ConsoleHost.h"
 #include "ConsoleHostImpl.h"
 
@@ -38,6 +39,30 @@
 
 #include <HostSharedData.h>
 #include <ReverseGameData.h>
+
+static void BuildFont(float scale);
+
+static ImGuiStyle InitStyle()
+{
+	ImGuiStyle style;
+
+	ImColor hiliteBlue = ImColor(81, 179, 236);
+	ImColor hiliteBlueTransparent = ImColor(81, 179, 236, 180);
+	ImColor backgroundBlue = ImColor(22, 24, 28, 200);
+	ImColor semiTransparentBg = ImColor(50, 50, 50, 0.6 * 255);
+	ImColor semiTransparentBgHover = ImColor(80, 80, 80, 0.6 * 255);
+
+	style.Colors[ImGuiCol_WindowBg] = backgroundBlue;
+	style.Colors[ImGuiCol_TitleBg] = hiliteBlue;
+	style.Colors[ImGuiCol_TitleBgActive] = hiliteBlue;
+	style.Colors[ImGuiCol_TitleBgCollapsed] = hiliteBlue;
+	style.Colors[ImGuiCol_Border] = hiliteBlue;
+	style.Colors[ImGuiCol_FrameBg] = semiTransparentBg;
+	style.Colors[ImGuiCol_FrameBgHovered] = semiTransparentBgHover;
+	style.Colors[ImGuiCol_TextSelectedBg] = hiliteBlueTransparent;
+
+	return style;
+}
 
 static bool g_conHostInitialized = false;
 extern bool g_consoleFlag;
@@ -269,7 +294,19 @@ static void HandleFxDKInput(ImGuiIO& io)
 	}
 }
 
+void OnConsoleFrameDraw(int width, int height, bool usedSharedD3D11);
+
 DLL_EXPORT void OnConsoleFrameDraw(int width, int height)
+{
+	return OnConsoleFrameDraw(width, height, false);
+}
+
+extern ID3D11DeviceContext* g_pd3dDeviceContext;
+
+extern float ImGui_ImplWin32_GetWindowDpiScale(ImGuiViewport* viewport);
+extern void ImGui_ImplDX11_RecreateFontsTexture();
+
+void OnConsoleFrameDraw(int width, int height, bool usedSharedD3D11)
 {
 	if (!g_conHostMutex.try_lock())
 	{
@@ -277,6 +314,27 @@ DLL_EXPORT void OnConsoleFrameDraw(int width, int height)
 	}
 
 #ifndef IS_LAUNCHER
+	static float lastScale = 1.0f;
+	float scale = ImGui_ImplWin32_GetWindowDpiScale(ImGui::GetMainViewport());
+
+	if (scale > 2.0f)
+	{
+		scale = 2.0f;
+	}
+
+	if (scale != lastScale)
+	{
+		ImGui::GetStyle() = InitStyle();
+		ImGui::GetStyle().ScaleAllSizes(scale);
+
+		BuildFont(scale);
+		CreateFontTexture();
+
+		ImGui_ImplDX11_RecreateFontsTexture();
+
+		lastScale = scale;
+	}
+
 	if (!g_fontTexture)
 	{
 		CreateFontTexture();
@@ -305,7 +363,6 @@ DLL_EXPORT void OnConsoleFrameDraw(int width, int height)
 
 	{
 		io.DisplaySize = ImVec2(width, height);
-
 		io.DeltaTime = (timeGetTime() - lastDrawTime) / 1000.0f;
 	}
 
@@ -318,10 +375,16 @@ DLL_EXPORT void OnConsoleFrameDraw(int width, int height)
 	{
 		MSG msg = { 0 };
 
-		while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+		// run a separate filtered message loop *per window* as we don't want to include the game window here
+		for (size_t viewport = 1; viewport < ImGui::GetPlatformIO().Viewports.Size; viewport++)
 		{
-			TranslateMessage(&msg);
-			DispatchMessageW(&msg);
+			auto hWnd = (HWND)ImGui::GetPlatformIO().Viewports[viewport]->PlatformHandleRaw;
+
+			while (PeekMessageW(&msg, hWnd, 0, 0, PM_REMOVE))
+			{
+				TranslateMessage(&msg);
+				DispatchMessageW(&msg);
+			}
 		}
 	}
 
@@ -361,8 +424,33 @@ DLL_EXPORT void OnConsoleFrameDraw(int width, int height)
 	ImGui::Render();
 	RenderDrawLists(ImGui::GetDrawData());
 
+	ID3D11RenderTargetView* oldRTV = nullptr;
+	ID3D11DepthStencilView* oldDSV = nullptr;
+
+	if (usedSharedD3D11)
+	{
+		g_pd3dDeviceContext->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+	}
+
     ImGui::UpdatePlatformWindows();
 	ImGui::RenderPlatformWindowsDefault();
+
+	if (usedSharedD3D11)
+	{
+		g_pd3dDeviceContext->OMSetRenderTargets(1, &oldRTV, oldDSV);
+
+		if (oldRTV)
+		{
+			oldRTV->Release();
+			oldRTV = nullptr;
+		}
+
+		if (oldDSV)
+		{
+			oldDSV->Release();
+			oldDSV = nullptr;
+		}
+	}
 
 	lastDrawTime = timeGetTime();
 
@@ -441,7 +529,12 @@ static void OnConsoleWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, 
 	}
 #endif
 
-	ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+	if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam) == TRUE)
+	{
+		pass = false;
+		result = true;
+		return;
+	}
 	
 	if (msg == WM_INPUT || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST))
 	{
@@ -468,6 +561,60 @@ DLL_EXPORT void RunConsoleWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 }
 
 ImFont* consoleFontTiny;
+
+static void BuildFont(float scale)
+{
+	auto& io = ImGui::GetIO();
+	io.Fonts->Clear();
+	io.Fonts->SetTexID(nullptr);
+
+	FILE* font = _wfopen(MakeRelativeCitPath(L"citizen/consolefont.ttf").c_str(), L"rb");
+
+	ImVector<ImWchar> ranges;
+	ImFontGlyphRangesBuilder builder;
+
+	static const ImWchar extra_ranges[] = {
+		0x0100,
+		0x017F, // Latin Extended-A
+		0x0180,
+		0x024F, // Latin Extended-B
+		0x0370,
+		0x03FF, // Greek and Coptic
+		0x10A0,
+		0x10FF, // Georgian
+		0x1E00,
+		0x1EFF, // Latin Extended Additional
+		0,
+	};
+
+	builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+	builder.AddRanges(io.Fonts->GetGlyphRangesCyrillic());
+	builder.AddRanges(&extra_ranges[0]);
+	builder.BuildRanges(&ranges);
+
+	if (font)
+	{
+		fseek(font, 0, SEEK_END);
+
+		auto fontSize = ftell(font);
+
+		std::unique_ptr<uint8_t[]> fontData(new uint8_t[fontSize]);
+
+		fseek(font, 0, SEEK_SET);
+
+		fread(&fontData[0], 1, fontSize, font);
+		fclose(font);
+
+		ImFontConfig fontCfg;
+		fontCfg.FontDataOwnedByAtlas = false;
+
+		io.Fonts->AddFontFromMemoryTTF(fontData.get(), fontSize, 22.0f * scale, &fontCfg, ranges.Data);
+		consoleFontSmall = io.Fonts->AddFontFromMemoryTTF(fontData.get(), fontSize, 18.0f * scale, &fontCfg, ranges.Data);
+		consoleFontTiny = io.Fonts->AddFontFromMemoryTTF(fontData.get(), fontSize, 14.0f * scale, &fontCfg, ranges.Data);
+
+		io.Fonts->Build();
+	}
+}
 
 #pragma comment(lib, "d3d11.lib")
 
@@ -504,6 +651,7 @@ static HookFunction initFunction([]()
 	io.ConfigWindowsResizeFromEdges = true;
 
 	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+	io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
 	io.BackendFlags |= ImGuiBackendFlags_HasSetMousePos; // We can honor io.WantSetMousePos requests (optional, rarely used)
 	io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports; // We can create multi-viewports on the Platform side (optional)
@@ -517,34 +665,12 @@ static HookFunction initFunction([]()
 	ID3D11Device* device;
 	ID3D11DeviceContext* immcon;
 
-	// use the system function as many proxy DLLs don't like multiple devices being made in the game process
-	// and they're 'closed source' and 'undocumented' so we can't reimplement the same functionality natively
-
-	// also, create device here and not after the game's or nui:core hacks will mismatch with proxy DLLs
-	wchar_t systemD3D11Name[512];
-	GetSystemDirectoryW(systemD3D11Name, std::size(systemD3D11Name));
-	wcscat(systemD3D11Name, L"\\d3d11.dll");
-
-	auto systemD3D11 = LoadLibraryW(systemD3D11Name);
-	assert(systemD3D11);
-
-	auto systemD3D11CreateDevice = (decltype(&D3D11CreateDevice))GetProcAddress(systemD3D11, "D3D11CreateDevice");
-
-	systemD3D11CreateDevice(NULL,
-	D3D_DRIVER_TYPE_HARDWARE,
-	nullptr,
-	0,
-	nullptr,
-	0,
-	D3D11_SDK_VERSION,
-	&device,
-	nullptr,
-	&immcon);
-
-	OnGrcCreateDevice.Connect([io, device, immcon]()
+	auto setupDevice = [](ID3D11Device* device, ID3D11DeviceContext* immcon)
 	{
-		if (device)
+		if (device && immcon)
 		{
+			auto& io = ImGui::GetIO();
+
 			if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
 			{
 				ImGui_ImplWin32_InitPlatformInterface();
@@ -552,7 +678,61 @@ static HookFunction initFunction([]()
 
 			ImGui_ImplDX11_Init(device, immcon);
 		}
+	};
+
+	bool usedSharedD3D11 = false;
+
+	// 'GTA_FIVE' is a D3D11 game so we can use the native D3D11 device
+#ifdef GTA_FIVE
+	// #TODO: if this turns out breaking, check for 'bad' graphics mods and only run this code if none is present
+	usedSharedD3D11 = true;
+
+	OnGrcCreateDevice.Connect([setupDevice]()
+	{
+		struct
+		{
+			void* vtbl;
+			ID3D11Device* rawDevice;
+		}* deviceStuff = (decltype(deviceStuff))GetD3D11Device();
+
+		setupDevice(deviceStuff->rawDevice, GetD3D11DeviceContext());
 	});
+#endif
+
+	if (!usedSharedD3D11)
+	{
+		// use the system function as many proxy DLLs don't like multiple devices being made in the game process
+		// and they're 'closed source' and 'undocumented' so we can't reimplement the same functionality natively
+
+		// also, create device here and not after the game's or nui:core hacks will mismatch with proxy DLLs
+		wchar_t systemD3D11Name[512];
+		GetSystemDirectoryW(systemD3D11Name, std::size(systemD3D11Name));
+		wcscat(systemD3D11Name, L"\\d3d11.dll");
+
+		auto systemD3D11 = LoadLibraryW(systemD3D11Name);
+		assert(systemD3D11);
+
+		auto systemD3D11CreateDevice = (decltype(&D3D11CreateDevice))GetProcAddress(systemD3D11, "D3D11CreateDevice");
+
+		systemD3D11CreateDevice(NULL,
+		D3D_DRIVER_TYPE_HARDWARE,
+		nullptr,
+		0,
+		nullptr,
+		0,
+		D3D11_SDK_VERSION,
+		&device,
+		nullptr,
+		&immcon);
+
+		OnGrcCreateDevice.Connect([device, immcon, setupDevice]()
+		{
+			if (device)
+			{
+				setupDevice(device, immcon);
+			}
+		});
+	}
 
 	io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
 
@@ -585,48 +765,12 @@ static HookFunction initFunction([]()
 	io.IniFilename = const_cast<char*>(imguiIni.c_str());
 	//io.ImeWindowHandle = g_hWnd;
 
-	ImGuiStyle& style = ImGui::GetStyle();
-
-	ImColor hiliteBlue = ImColor(81, 179, 236);
-	ImColor hiliteBlueTransparent = ImColor(81, 179, 236, 180);
-	ImColor backgroundBlue = ImColor(22, 24, 28, 200);
-	ImColor semiTransparentBg = ImColor(50, 50, 50, 0.6 * 255);
-	ImColor semiTransparentBgHover = ImColor(80, 80, 80, 0.6 * 255);
-
-	style.Colors[ImGuiCol_WindowBg] = backgroundBlue;
-	style.Colors[ImGuiCol_TitleBg] = hiliteBlue;
-	style.Colors[ImGuiCol_TitleBgActive] = hiliteBlue;
-	style.Colors[ImGuiCol_TitleBgCollapsed] = hiliteBlue;
-	style.Colors[ImGuiCol_Border] = hiliteBlue;
-	style.Colors[ImGuiCol_FrameBg] = semiTransparentBg;
-	style.Colors[ImGuiCol_FrameBgHovered] = semiTransparentBgHover;
-	style.Colors[ImGuiCol_TextSelectedBg] = hiliteBlueTransparent;
+	ImGui::GetStyle() = InitStyle();
 
 	// fuck rounding
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
 
-	{
-		FILE* font = _wfopen(MakeRelativeCitPath(L"citizen/mensch.ttf").c_str(), L"rb");
-
-		if (font)
-		{
-			fseek(font, 0, SEEK_END);
-
-			auto fontSize = ftell(font);
-
-			uint8_t* fontData = new uint8_t[fontSize];
-
-			fseek(font, 0, SEEK_SET);
-
-			fread(&fontData[0], 1, fontSize, font);
-			fclose(font);
-
-			io.Fonts->AddFontFromMemoryTTF(fontData, fontSize, 22.0f);
-
-			consoleFontSmall = io.Fonts->AddFontFromMemoryTTF(fontData, fontSize, 18.0f);
-			consoleFontTiny = io.Fonts->AddFontFromMemoryTTF(fontData, fontSize, 14.0f);
-		}
-	}
+	BuildFont(1.0f);
 
 #ifndef IS_LAUNCHER
 	OnGrcCreateDevice.Connect([=]()
@@ -661,7 +805,7 @@ static HookFunction initFunction([]()
 
 				if (vKey < 256)
 				{
-					io.KeysDown[vKey] = 1;
+					io.KeysDown[vKey] = true;
 				}
 			}
 
@@ -673,7 +817,7 @@ static HookFunction initFunction([]()
 
 				if (vKey < 256)
 				{
-					io.KeysDown[vKey] = 0;
+					io.KeysDown[vKey] = false;
 				}
 			}
 
@@ -685,7 +829,7 @@ static HookFunction initFunction([]()
 
 				if (buttonIdx < std::size(io.MouseDown))
 				{
-					io.MouseDown[buttonIdx] = true;
+					io.AddMouseButtonEvent(buttonIdx, true);
 				}
 			}
 
@@ -697,7 +841,7 @@ static HookFunction initFunction([]()
 
 				if (buttonIdx < std::size(io.MouseDown))
 				{
-					io.MouseDown[buttonIdx] = false;
+					io.AddMouseButtonEvent(buttonIdx, false);
 				}
 			}
 
@@ -711,7 +855,7 @@ static HookFunction initFunction([]()
 				std::unique_lock<std::mutex> g_conHostMutex;
 
 				ImGuiIO& io = ImGui::GetIO();
-				io.MouseWheel += delta > 0 ? +1.0f : -1.0f;
+				io.AddMouseWheelEvent(0.0f, delta > 0 ? +1.0f : -1.0f);
 			}
 
 			virtual inline void MouseMove(int x, int y) override
@@ -719,8 +863,7 @@ static HookFunction initFunction([]()
 				std::unique_lock<std::mutex> g_conHostMutex;
 
 				ImGuiIO& io = ImGui::GetIO();
-				io.MousePos.x = (signed short)(x);
-				io.MousePos.y = (signed short)(y);
+				io.AddMousePosEvent((signed short)(x), (signed short)(y));
 			}
 		} tgt;
 
@@ -742,12 +885,12 @@ static HookFunction initFunction([]()
 		}
 	});
 
-	OnPostFrontendRender.Connect([]()
+	OnPostFrontendRender.Connect([usedSharedD3D11]()
 	{
 		int width, height;
 		GetGameResolution(width, height);
 
-		OnConsoleFrameDraw(width, height);
+		OnConsoleFrameDraw(width, height, usedSharedD3D11);
 	});
 #endif
 });

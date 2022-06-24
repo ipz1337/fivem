@@ -9,14 +9,14 @@
 
 #include <numeric>
 
-#include <pgBase.h>
-#include <pgContainers.h>
+#include "pgBase.h"
+#include "pgContainers.h"
 //#include <grcTexture.h>
 
 #include <DirectXMath.h>
 
 #define RAGE_FORMATS_FILE rmcDrawable
-#include <formats-header.h>
+#include "formats-header.h"
 
 #ifdef RAGE_FORMATS_OK
 #if defined(RAGE_FORMATS_GAME_NY)
@@ -1579,11 +1579,7 @@ private:
 	pgArray<uint32_t> m_shaderIndices;
 #elif defined(RAGE_FORMATS_GAME_FIVE) || defined(RAGE_FORMATS_GAME_PAYNE) || defined(RAGE_FORMATS_GAME_RDR3)
 	pgObjectArray<int> _f20;
-#if defined(RAGE_FORMATS_GAME_RDR3)
 	TPtr _f30;
-#else
-	uint32_t _f30;
-#endif
 	TPtr _f38;
 #endif
 
@@ -2518,6 +2514,16 @@ public:
 		return m_models[idx]->Get(0);
 	}
 
+	inline auto GetLod(int idx)
+	{
+		if (idx < 0 || idx >= _countof(m_models))
+		{
+			abort();
+		}
+
+		return *m_models[idx];
+	}
+
 	inline pgObjectArray<grmModel>* GetPrimaryModel()
 	{
 		return *m_models[0];
@@ -2552,6 +2558,30 @@ public:
 		models[0] = model;
 
 		m_models[idx] = new(false) pgObjectArray<grmModel>(models, 1);
+	}
+
+	inline void SetLod(int idx, grmModel** inModels, size_t numModels)
+	{
+		if (idx < 0 || idx >= _countof(m_models))
+		{
+			abort();
+		}
+
+		if (inModels == nullptr)
+		{
+			m_models[idx] = nullptr;
+			return;
+		}
+
+		pgPtr<grmModel> models[64];
+		assert(numModels < std::size(models));
+
+		for (size_t i = 0; i < numModels; i++)
+		{
+			models[i] = inModels[i];
+		}
+
+		m_models[idx] = new (false) pgObjectArray<grmModel>(models, numModels);
 	}
 
 	inline int GetDrawBucketMask(int idx)
@@ -2652,4 +2682,4 @@ public:
 };
 #endif
 
-#include <formats-footer.h>
+#include "formats-footer.h"

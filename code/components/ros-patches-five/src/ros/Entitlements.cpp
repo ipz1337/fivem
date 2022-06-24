@@ -167,9 +167,9 @@ std::string GetEntitlementBlock(uint64_t accountId, const std::string& machineHa
 				{ "rosId", fmt::sprintf("%lld", accountId) }
 			});
 
-		if (r.status_code != 200)
+		if (r.error || r.status_code >= 400)
 		{
-			if (r.status_code < 500)
+			if (r.status_code == 401)
 			{
 				DeleteFileW(ToWide(GetOwnershipPath()).c_str());
 			}
@@ -747,13 +747,13 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
 <?xml version="1.0" encoding="utf-8"?>
 <Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="GetBuildManifestFull">
   <Status>1</Status>
-  <Result BuildId="82" VersionNumber="1.0.1436.26" BuildDateUtc="2019-11-05T11:39:37.0266667">
+  <Result BuildId="83" VersionNumber="1.0.1436.28" BuildDateUtc="2019-11-05T11:39:37.0266667">
     <FileManifest>
-		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="89830808" TimestampUtc="2019-11-05T11:39:34.8800000">
+		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="89849752" TimestampUtc="2019-11-05T11:39:34.8800000">
 			<RelativePath>RDR2.exe</RelativePath>
-			<SHA256Hash>d3ac2403bac567a460617af4dc3df15d0928b0e8634da76dcf64de56ad7bdf87</SHA256Hash>
+			<SHA256Hash>d48c58d9df9ec17aca677da0f03ce1fd666c1f89f0f42422bbcc1de236ff9c26</SHA256Hash>
 			<FileChunks>
-				<Chunk FileChunkId="13046" SHA256Hash="d3ac2403bac567a460617af4dc3df15d0928b0e8634da76dcf64de56ad7bdf87" StartByteOffset="0" Size="89830808" />
+				<Chunk FileChunkId="13046" SHA256Hash="d48c58d9df9ec17aca677da0f03ce1fd666c1f89f0f42422bbcc1de236ff9c26" StartByteOffset="0" Size="89849752" />
 			</FileChunks>
 		</FileDetails>
 %s
@@ -821,6 +821,46 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
 			<SHA256Hash>7b3c0053db37eca7c6cdd0ecd268882cdd5f693f416e5a8e97fd31de66324d04</SHA256Hash>
 			<FileChunks>
 				<Chunk FileChunkId="13046" SHA256Hash="7b3c0053db37eca7c6cdd0ecd268882cdd5f693f416e5a8e97fd31de66324d04" StartByteOffset="0" Size="55559560" />
+			</FileChunks>
+		</FileDetails>
+    </FileManifest>
+    <IsPreload>false</IsPreload>
+  </Result>
+</Response>)");
+			}
+			else if (xbr::IsGameBuild<2612>())
+			{
+					return fmt::sprintf(R"(
+<?xml version="1.0" encoding="utf-8"?>
+<Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="GetBuildManifestFull">
+  <Status>1</Status>
+  <Result BuildId="95" VersionNumber="1.0.2612.1" BuildDateUtc="2021-11-05T11:39:37.0266667">
+    <FileManifest>
+		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="60351952" TimestampUtc="2021-11-05T11:39:34.8800000">
+			<RelativePath>GTA5.exe</RelativePath>
+			<SHA256Hash>06b59a02747c3d9f74c6c3621756387f4d85b148a882f4a6735a03383875c1f9</SHA256Hash>
+			<FileChunks>
+				<Chunk FileChunkId="13046" SHA256Hash="06b59a02747c3d9f74c6c3621756387f4d85b148a882f4a6735a03383875c1f9" StartByteOffset="0" Size="60351952" />
+			</FileChunks>
+		</FileDetails>
+    </FileManifest>
+    <IsPreload>false</IsPreload>
+  </Result>
+</Response>)");
+			}
+			else if (xbr::IsGameBuild<2545>())
+			{
+				return fmt::sprintf(R"(
+<?xml version="1.0" encoding="utf-8"?>
+<Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="GetBuildManifestFull">
+  <Status>1</Status>
+  <Result BuildId="94" VersionNumber="1.0.2545.0" BuildDateUtc="2021-11-05T11:39:37.0266667">
+    <FileManifest>
+		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="59988376" TimestampUtc="2021-11-05T11:39:34.8800000">
+			<RelativePath>GTA5.exe</RelativePath>
+			<SHA256Hash>964a8c25af4f622aedcd0de13717d261a07ccfcc734f5885bcfd5f173330cd06</SHA256Hash>
+			<FileChunks>
+				<Chunk FileChunkId="13046" SHA256Hash="964a8c25af4f622aedcd0de13717d261a07ccfcc734f5885bcfd5f173330cd06" StartByteOffset="0" Size="59988376" />
 			</FileChunks>
 		</FileDetails>
     </FileManifest>
@@ -971,6 +1011,22 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
 
 	mapper->AddGameService("app.asmx/GetApps", [](const std::string& body)
 	{
+		static std::map<int, int> fiveBuildsToVersions{
+			{ 372, 4 },
+			{ 1604, 80 },
+			{ 2060, 83 },
+			{ 2189, 88 },
+			{ 2372, 92 },
+			{ 2545, 94 },
+			{ 2612, 95 },
+		};
+
+		static std::map<int, int> rdrBuildsToVersions{
+			{ 1311, 79 },
+			{ 1355, 80 },
+			{ 1436, 83 },
+		};
+
 		return fmt::sprintf(R"(<?xml version="1.0" encoding="utf-8"?>
 <Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="GetApps">
   <Status>1</Status>
@@ -1044,8 +1100,8 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
     </App>
   </Result>
 </Response>)",
-		xbr::IsGameBuild<372>() ? 4 : (xbr::IsGameBuild<2060>() ? 83 : (xbr::IsGameBuild<2372>() ? 92 : (xbr::IsGameBuild<2189>() ? 88 : 80))),
-		xbr::IsGameBuild<1355>() ? 80 : (xbr::IsGameBuild<1436>() ? 82 : 79));
+		fiveBuildsToVersions[xbr::GetGameBuild()],
+		rdrBuildsToVersions[xbr::GetGameBuild()]);
 	});
 
 

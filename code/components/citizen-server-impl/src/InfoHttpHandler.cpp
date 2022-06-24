@@ -31,6 +31,8 @@ inline uint32_t SwapLong(uint32_t x)
 	return (x << 16) | (x >> 16);
 }
 
+extern std::shared_ptr<ConVar<std::string>> g_steamApiKey;
+
 namespace fx
 {
 struct InfoHttpHandlerComponentLocals : fwRefCountable
@@ -96,6 +98,18 @@ struct InfoHttpHandlerComponentLocals : fwRefCountable
 
 					infoJson["resources"].push_back(resource->GetName());
 				});
+
+				std::string requestSteamTicket = "on";
+				if (g_steamApiKey->GetValue().empty())
+				{
+					requestSteamTicket = "unset";
+				}
+				else if (g_steamApiKey->GetValue() == "none")
+				{
+					requestSteamTicket = "off";
+				}
+
+				infoJson["requestSteamTicket"] = requestSteamTicket;
 
 				infoJson["version"] = 0;
 
@@ -412,8 +426,8 @@ void InfoHttpHandlerComponentLocals::AttachToObject(fx::ServerInstanceBase* inst
 			
 		if (baseUrl)
 		{
-			console::Printf("profiler", "You can view the recorded profile data at ^4https://frontend.chrome-dev.tools/serve_rev/@901bcc219d9204748f9c256ceca0f2cd68061006/inspector.html?loadTimelineFromURL=https://%s/profileData.json^7 in Chrome (or compatible).\n",
-				baseUrl->GetValue());
+			console::Printf("profiler", "You can view the recorded profile data at ^4%s?loadTimelineFromURL=https://%s/profileData.json^7 in Chrome (or compatible).\n",
+				fx::ProfilerComponent::GetDevToolsURL(), baseUrl->GetValue());
 		}
 	});
 

@@ -16,6 +16,7 @@
 
 #include <CoreConsole.h>
 
+#include <boost/algorithm/string/case_conv.hpp>
 #include <rapidjson/document.h>
 
 #include <sstream>
@@ -43,7 +44,10 @@ NUIClient::NUIClient(NUIWindow* window)
 	}
 
 	m_renderHandler = new NUIRenderHandler(this);
+}
 
+void NUIClient::Initialize()
+{
 	CefRefPtr<NUIClient> thisRef(this);
 
 	nui::RequestNUIBlocklist([thisRef](bool success, const char* data, size_t length)
@@ -74,6 +78,11 @@ NUIClient::NUIClient(NUIWindow* window)
 
 void NUIClient::OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType transitionType)
 {
+	if (frame->IsMain() && m_window && m_window->GetName() == "nui_mpMenu")
+	{
+		m_loadedMainFrame = false;
+	}
+
 	if (g_audioSink)
 	{
 		browser->GetHost()->SetAudioMuted(true);
@@ -114,6 +123,24 @@ const doHook = () => {
 	});
 };
 
+for (const old of ['profile', 'profileEnd']) {
+	const oldProfile = console[old];
+	Object.defineProperty(console, old, {
+		get: () => {
+			return (...args) => {
+				for (const arg of args) {
+					try {
+						arg.toString();
+					} catch {
+					}
+				}
+
+				return oldProfile(...args);
+			};
+		}
+	});
+}
+
 const oldDefineGetter = Object.prototype.__defineGetter__;
 Object.prototype.__defineGetter__ = function(prop, func) {
 	if (prop === 'id') {
@@ -125,7 +152,6 @@ Object.prototype.__defineGetter__ = function(prop, func) {
 		"nui://patches", 0);
 	}
 
-#ifndef USE_NUI_ROOTLESS
 	if (url == "nui://game/ui/root.html")
 	{
 		static ConVar<std::string> uiUrlVar("ui_url", ConVar_None, "https://nui-game-internal/ui/app/index.html");
@@ -137,9 +163,9 @@ Object.prototype.__defineGetter__ = function(prop, func) {
 			nui::CreateFrame("mpMenu", uiUrlVar.GetValue());
 		}
 	}
-#else
+
 	// enter push function
-	if (frame->IsMain())
+	if (frame->IsMain() && m_window && m_window->GetName() == "nui_mpMenu")
 	{
 		frame->ExecuteJavaScript(R"(
 (() => {
@@ -183,7 +209,6 @@ Object.prototype.__defineGetter__ = function(prop, func) {
 			m_window->ProcessLoadQueue();
 		}
 	}
-#endif
 }
 
 void NUIClient::OnAfterCreated(CefRefPtr<CefBrowser> browser)
@@ -215,9 +240,18 @@ void NUIClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<Cef
 	model->Clear();
 }
 
+extern HCURSOR g_defaultCursor;
+
 bool NUIClient::OnCursorChange(CefRefPtr<CefBrowser> browser, CefCursorHandle cursor, cef_cursor_type_t type, const CefCursorInfo& custom_cursor_info)
 {
-	g_nuiGi->SetHostCursor(cursor);
+	if (!cursor || type == CT_POINTER)
+	{
+		g_nuiGi->SetHostCursor(g_defaultCursor);
+	}
+	else
+	{
+		g_nuiGi->SetHostCursor(cursor);
+	}
 
 	return true;
 }
@@ -229,7 +263,10 @@ bool NUIClient::OnConsoleMessage(CefRefPtr<CefBrowser> browser, cef_log_severity
 
 	// skip websocket error messages and mpMenu messages
 	// some of these can't be blocked from script and users get very confused by them appearing in console
-	if (messageStr.find(L"WebSocket connection to") != std::string::npos || sourceStr.find(L"nui-game-internal") != std::string::npos || sourceStr.find(L"chrome-devtools") != std::string::npos)
+	if (messageStr.find(L"WebSocket connection to") != std::string::npos || sourceStr.find(L"nui-game-internal") != std::string::npos || sourceStr.find(L"chrome-devtools") != std::string::npos ||
+		// some weird loading screen embeds use this, but newer Chrome writes to log in that case
+		// users get confused, again, as well: 'I'm stuck in loading due to this error, what is this?'
+		messageStr.find(L"target-densitydpi") != std::string::npos)
 	{
 		return false;
 	}
@@ -287,6 +324,11 @@ auto NUIClient::OnBeforePopup(CefRefPtr<CefBrowser> browser,
 auto NUIClient::OnBeforeResourceLoad(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request, CefRefPtr<CefRequestCallback> callback) -> ReturnValue
 {
 	auto url = request->GetURL().ToString();
+
+	if (boost::algorithm::to_lower_copy(url).find("file://") != std::string::npos)
+	{
+		return RV_CANCEL;
+	}
 
 #if !defined(USE_NUI_ROOTLESS) && !defined(_DEBUG)
 	if (frame->IsMain())

@@ -21,6 +21,7 @@ export class Setting {
 	category?: string;
 	displayDefault?: string;
 
+	placeholderCb?: () => Observable<string>;
 	getCb?: () => Observable<string>;
 	setCb?: (value: string) => void;
 
@@ -48,6 +49,7 @@ export class SettingsService {
 			name: '#Settings_Nickname',
 			description: '#Settings_Nickname',
 			type: 'text',
+			placeholderCb: () => this.gameService.getConvar('ui_extNickname'),
 			getCb: () => this.gameService.nicknameChange,
 			setCb: (value) => this.gameService.nickname = value,
 			category: '#SettingsCat_Connection',
@@ -200,34 +202,34 @@ export class SettingsService {
 			category: '#SettingsCat_Account',
 		});
 
+		this.addSetting('accountButton', {
+			name: '#Settings_Account',
+			type: 'button',
+			description: '#Settings_AccountLink',
+			setCb: (value) => this.linkAccount(),
+			showCb: () => discourseService.signinChange.pipe(map(user => !user)),
+			category: '#SettingsCat_Account',
+		});
+
+		this.addSetting('accountLabel', {
+			name: '#Settings_Account',
+			type: 'label',
+			showCb: () => discourseService.signinChange.pipe(map(user => !!user)),
+			labelCb: () =>
+				combineLatest([
+					gameService.streamerModeChange,
+					discourseService.signinChange,
+					translation.onChange()
+				]).pipe(map(
+					([streamerMode, user, _]) =>
+						translation.translate('#Settings_AccountLinked', {
+							username: streamerMode ? '<HIDDEN>' : (user?.username ?? '')
+						})
+				)),
+			category: '#SettingsCat_Account',
+		});
+
 		if (this.gameService.gameName !== 'rdr3' && this.gameService.gameName !== 'ny') {
-			this.addSetting('accountButton', {
-				name: '#Settings_Account',
-				type: 'button',
-				description: '#Settings_AccountLink',
-				setCb: (value) => this.linkAccount(),
-				showCb: () => discourseService.signinChange.pipe(map(user => !user)),
-				category: '#SettingsCat_Account',
-			});
-
-			this.addSetting('accountLabel', {
-				name: '#Settings_Account',
-				type: 'label',
-				showCb: () => discourseService.signinChange.pipe(map(user => !!user)),
-				labelCb: () =>
-					combineLatest([
-						gameService.streamerModeChange,
-						discourseService.signinChange,
-						translation.onChange()
-					]).pipe(map(
-						([streamerMode, user, _]) =>
-							translation.translate('#Settings_AccountLinked', {
-								username: streamerMode ? '<HIDDEN>' : (user?.username ?? '')
-							})
-					)),
-				category: '#SettingsCat_Account',
-			});
-
 			this.addSetting('boostLoading', {
 				name: '#Settings_Boost',
 				type: 'label',
@@ -277,7 +279,8 @@ export class SettingsService {
 			setCb: (value) => this.gameService.setConvar('ui_updateChannel', value),
 			options: {
 				'production': 'Release',
-				'canary': 'Canary (Experimental/Unstable)',
+				'beta': 'Beta',
+				'canary': 'Latest (Unstable)',
 			},
 			category: '#SettingsCat_Game',
 		});

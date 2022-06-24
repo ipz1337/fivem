@@ -14,6 +14,7 @@
 #include <msgpack.hpp>
 
 #include <DebugAlias.h>
+#include <IteratorView.h>
 
 static inline bool IsServer()
 {
@@ -127,24 +128,6 @@ void ResourceEventComponent::AttachToObject(Resource* object)
 		*/
 		m_managerComponent->TriggerEvent2("onResourceStop", {}, m_resource->GetName());
 	}, -99999);
-
-	object->OnTick.Connect([=] ()
-	{
-		// take queued events and trigger them
-		while (!m_eventQueue.empty())
-		{
-			// get the event
-			EventData event;
-
-			if (m_eventQueue.try_pop(event))
-			{
-				// and trigger it
-				bool canceled = false;
-
-				HandleTriggerEvent(event.eventName, event.eventPayload, event.eventSource, &canceled);
-			}
-		}
-	});
 }
 
 void ResourceEventComponent::HandleTriggerEvent(const std::string& eventName, const std::string& eventPayload, const std::string& eventSource, bool* eventCanceled)
@@ -155,14 +138,7 @@ void ResourceEventComponent::HandleTriggerEvent(const std::string& eventName, co
 
 void ResourceEventComponent::QueueEvent(const std::string& eventName, const std::string& eventPayload, const std::string& eventSource /* = std::string() */)
 {
-	EventData event;
-	event.eventName = eventName;
-	event.eventPayload = eventPayload;
-	event.eventSource = eventSource;
-
-	{
-		m_eventQueue.push(event);
-	}
+	m_managerComponent->QueueEvent(eventName, eventPayload, eventSource, this);
 }
 
 ResourceEventManagerComponent::ResourceEventManagerComponent()
@@ -181,7 +157,7 @@ void ResourceEventManagerComponent::Tick()
 		if (m_eventQueue.try_pop(event))
 		{
 			// and trigger it
-			TriggerEvent(event.eventName, event.eventPayload, event.eventSource);
+			TriggerEvent(event.eventName, event.eventPayload, event.eventSource, event.filter);
 		}
 	}
 }
@@ -189,7 +165,21 @@ void ResourceEventManagerComponent::Tick()
 static thread_local bool g_wasLastEventCanceled;
 static thread_local std::stack<bool*> g_eventCancelationStack;
 
-bool ResourceEventManagerComponent::TriggerEvent(const std::string& eventName, const std::string& eventPayload, const std::string& eventSource /* = std::string() */)
+void ResourceEventManagerComponent::AddResourceHandledEvent(const std::string& resourceName, const std::string& eventName)
+{
+	// try checking if this pair already exists
+	for (const auto& pair : fx::GetIteratorView(m_eventResources.equal_range(eventName)))
+	{
+		if (pair.second == resourceName)
+		{
+			return;
+		}
+	}
+
+	m_eventResources.emplace(eventName, resourceName);
+}
+
+bool ResourceEventManagerComponent::TriggerEvent(const std::string& eventName, const std::string& eventPayload, const std::string& eventSource /* = std::string() */, ResourceEventComponent* filter /* = nullptr*/)
 {
 	// add a value to signify event cancelation
 	bool eventCanceled = false;
@@ -200,7 +190,7 @@ bool ResourceEventManagerComponent::TriggerEvent(const std::string& eventName, c
 	OnTriggerEvent(eventName, eventPayload, eventSource, &eventCanceled);
 
 	// trigger local handlers
-	m_manager->ForAllResources([&] (const fwRefContainer<Resource>& resource)
+	auto forResource = [&](const fwRefContainer<Resource>& resource)
 	{
 		// get the event component
 		const fwRefContainer<ResourceEventComponent>& eventComponent = resource->GetComponent<ResourceEventComponent>();
@@ -214,7 +204,27 @@ bool ResourceEventManagerComponent::TriggerEvent(const std::string& eventName, c
 
 		// continue on
 		eventComponent->HandleTriggerEvent(eventName, eventPayload, eventSource, &eventCanceled);
-	});
+	};
+
+	if (!filter)
+	{
+		for (const auto& eventKey : { std::string{ "*" }, eventName })
+		{
+			for (const auto& resourcePair : fx::GetIteratorView(m_eventResources.equal_range(eventKey)))
+			{
+				auto resource = m_manager->GetResource(resourcePair.second, false);
+
+				if (resource.GetRef())
+				{
+					forResource(resource);
+				}
+			}
+		}
+	}
+	else
+	{
+		filter->HandleTriggerEvent(eventName, eventPayload, eventSource, &eventCanceled);
+	}
 
 	// pop the stack entry
 	g_eventCancelationStack.pop();
@@ -239,19 +249,23 @@ void ResourceEventManagerComponent::CancelEvent()
 	}
 }
 
-void ResourceEventManagerComponent::QueueEvent(const std::string& eventName, const std::string& eventPayload, const std::string& eventSource /* = std::string() */)
+void ResourceEventManagerComponent::QueueEvent(const std::string& eventName, const std::string& eventPayload, const std::string& eventSource /* = std::string() */, ResourceEventComponent* filter)
 {
 	EventData event;
 	event.eventName = eventName;
 	event.eventPayload = eventPayload;
 	event.eventSource = eventSource;
+	event.filter = filter;
 
 	{
 		m_eventQueue.push(event);
 	}
 
-	// trigger global handlers for the queued event
-	OnQueueEvent(eventName, eventPayload, eventSource);
+	if (!filter)
+	{
+		// trigger global handlers for the queued event
+		OnQueueEvent(eventName, eventPayload, eventSource);
+	}
 }
 
 void ResourceEventManagerComponent::AttachToObject(ResourceManager* object)

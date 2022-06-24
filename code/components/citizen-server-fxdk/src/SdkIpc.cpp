@@ -752,9 +752,14 @@ namespace fxdk
 
 		m_timer = GetSdkIpcLoop()->resource<uvw::TimerHandle>();
 
-		m_timer->on<uvw::TimerEvent>([ipc](const uvw::TimerEvent& evt, uvw::TimerHandle&)
+		m_timer->on<uvw::TimerEvent>([this, ipc](const uvw::TimerEvent& evt, uvw::TimerHandle&)
 		{
-			const auto& resourceDatas = fx::ResourceMonitor::GetCurrent()->GetResourceDatas();
+			if (!m_resourceMonitor)
+			{
+				m_resourceMonitor = std::make_unique<fx::ResourceMonitor>();
+			}
+
+			const auto& resourceDatas = m_resourceMonitor->GetResourceDatas();
 
 			std::vector<std::tuple<std::string, double, double, int64_t, int64_t>> resourceDatasClean;
 			for (const auto& data : resourceDatas)

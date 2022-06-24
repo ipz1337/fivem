@@ -272,10 +272,21 @@ void MumbleAudioOutput::ClientAudioState::OnBufferEnd(void* cxt)
 {
 	auto buffer = reinterpret_cast<int16_t*>(cxt);
 
-	_aligned_free(buffer);
+	if (buffer != nullptr) // Preemptively handle pBufferContext being NULL. Even if never in this case
+	{
+		_aligned_free(buffer);
+	}
 
 	XAUDIO2_VOICE_STATE vs;
-	voice->GetState(&vs);
+	{
+		vs.BuffersQueued = 0;
+
+		std::lock_guard _(m_render);
+		if (voice != nullptr)
+		{
+			voice->GetState(&vs);
+		}
+	}
 
 	if (vs.BuffersQueued == 0)
 	{
@@ -379,6 +390,13 @@ struct XA2DestinationNode : public lab::AudioDestinationNode
 		// work around XA2.7 issue (for Win7) where >64 buffers being enqueued are a fatal error (leading to __debugbreak)
 		// "SimpList: non-growable list ran out of room for new elements"
 
+		// @FIX(fillet-zulu-mississippi)
+		std::lock_guard _(state->m_render);
+		if (state->voice == nullptr)
+		{
+			return;
+		}
+
 		XAUDIO2_VOICE_STATE vs;
 		state->voice->GetState(&vs);
 
@@ -435,6 +453,13 @@ void MumbleAudioOutput::ClientAudioState::PushSoundInternal(uint16_t* voiceBuffe
 
 MumbleAudioOutput::ClientAudioState::~ClientAudioState()
 {
+	// Hopefully @FIX(pasta-pizza-purple): the voice object exists (rcx).
+	// However, its vtable "mov rax, [rcx]" is 0x0.
+	//
+	// This will likely do nothing for friend-two-oranges, as that issue seems
+	// correlated to offloading audio context deconstruction duties onto another
+	// thread
+	std::lock_guard _(m_render);
 	lab::AudioContext* contextRef = context.get();
 
 	if (contextRef)
@@ -1159,6 +1184,7 @@ void MumbleAudioOutput::ClientAudioState::PushPosition(MumbleAudioOutput* baseIo
 {
 	using namespace DirectX;
 
+	std::lock_guard _(m_render);
 	auto client = this;
 
 	if (voice)
@@ -1406,8 +1432,12 @@ void MumbleAudioOutput::SetMatrix(float position[3], float front[3], float up[3]
 
 void MumbleAudioOutput::HandleClientDisconnect(const MumbleUser& user)
 {
-	std::unique_lock<std::shared_mutex> _(m_clientsMutex);
-	m_clients[user.GetSessionId()] = nullptr;
+	std::shared_ptr<BaseAudioState> ptr;
+
+	{
+		std::unique_lock<std::shared_mutex> _(m_clientsMutex);
+		std::swap(ptr, m_clients[user.GetSessionId()]);
+	}
 }
 
 void MumbleAudioOutput::GetTalkers(std::vector<uint32_t>* talkers)
@@ -1554,6 +1584,8 @@ std::shared_ptr<lab::AudioContext> MumbleAudioOutput::GetAudioContext(const std:
 	return {};
 }
 
+extern std::mutex g_mmDeviceMutex;
+
 void MumbleAudioOutput::InitializeAudioDevice()
 {
 	{
@@ -1582,41 +1614,47 @@ void MumbleAudioOutput::InitializeAudioDevice()
 		MumbleAudioOutput* self;
 	} unlocker(this);
 
-	if (!m_mmDeviceEnumerator)
+	// this initialization *needs* to be locked as otherwise it'll expose a race condition in Steam's 'gameoverlayrenderer64.dll' leading to a
+	// stack overflow with the built-in OS mic monitoring shim in apphelp.dll and Steam's hook calling itself recursively
 	{
-		HRESULT hr = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER, IID_IMMDeviceEnumerator, (void**)m_mmDeviceEnumerator.GetAddressOf());
+		std::unique_lock _(g_mmDeviceMutex);
 
-		if (FAILED(hr))
+		if (!m_mmDeviceEnumerator)
 		{
-			trace("%s: failed MMDeviceEnumerator (%08x)\n", __func__, hr);
-			return;
-		}
-	}
+			HRESULT hr = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER, IID_IMMDeviceEnumerator, (void**)m_mmDeviceEnumerator.GetAddressOf());
 
-	while (!device.Get())
-	{
-		if (m_deviceGuid.empty())
-		{
-			if (FAILED(m_mmDeviceEnumerator->GetDefaultAudioEndpoint(eRender, eCommunications, device.ReleaseAndGetAddressOf())))
+			if (FAILED(hr))
 			{
-				trace("%s: failed GetDefaultAudioEndpoint\n", __func__);
+				trace("%s: failed MMDeviceEnumerator (%08x)\n", __func__, hr);
 				return;
 			}
 		}
-		else
-		{
-			device = GetMMDeviceFromGUID(false, m_deviceGuid);
 
-			if (!device.Get())
+		while (!device.Get())
+		{
+			if (m_deviceGuid.empty())
 			{
-				trace("%s: failed GetMMDeviceFromGUID\n", __func__);
-				m_deviceGuid = "";
+				if (FAILED(m_mmDeviceEnumerator->GetDefaultAudioEndpoint(eRender, eCommunications, device.ReleaseAndGetAddressOf())))
+				{
+					trace("%s: failed GetDefaultAudioEndpoint\n", __func__);
+					return;
+				}
+			}
+			else
+			{
+				device = GetMMDeviceFromGUID(false, m_deviceGuid);
+
+				if (!device.Get())
+				{
+					trace("%s: failed GetMMDeviceFromGUID\n", __func__);
+					m_deviceGuid = "";
+				}
 			}
 		}
-	}
 
-	// opt out of ducking
-	DuckingOptOut(device);
+		// opt out of ducking
+		DuckingOptOut(device);
+	}
 
 	auto xa2Dll = LoadLibraryExW(L"XAudio2_8.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 	decltype(&CreateAudioReverb) _CreateAudioReverb;

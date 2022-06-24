@@ -44,9 +44,15 @@ static hook::cdecl_stub<int(bool, int)> getWarningResult([] ()
 
 static bool g_showWarningMessage;
 static std::string g_warningMessage;
+extern volatile bool g_isNetworkKilled;
 
 void FiveGameInit::KillNetwork(const wchar_t* errorString)
 {
+	if (g_isNetworkKilled)
+	{
+		return;
+	}
+
 	if (errorString == (wchar_t*)1)
 	{
 		OnKillNetwork("Reloading game.");
@@ -103,23 +109,29 @@ static hook::cdecl_stub<void(rage::InitFunctionType)> gamerInfoMenu__shutdown([]
 	return hook::get_pattern("83 F9 08 75 46 53 48 83 EC 20 48 83", 0);
 });
 
-static void(*g_origLoadMultiplayerTextChat)();
+static void** g_textChat;
+static void(*g_origLoadMultiplayerTextChat)(void*);
 
 static void** g_textInputBox;
 
+#include <MinHook.h>
+
+void Void()
+{
+}
+
 static HookFunction hookFunction([]()
 {
-	// really bad pattern pointing to switch-to-netgame
-	if (!xbr::IsGameBuildOrGreater<2060>() && !Is372())
+	MH_Initialize();
+
+	if (!Is372())
 	{
-		auto location = hook::get_pattern("E8 ? ? ? ? B9 08 00 00 00 E8 ? ? ? ? E8", 15);
+		MH_CreateHook(hook::get_pattern("74 07 B0 01 E9 ? ? ? ? 83 65", (xbr::IsGameBuildOrGreater<2372>() ? -0x23 : -0x26)), Void, (void**)&g_origLoadMultiplayerTextChat);
 
-		hook::set_call(&g_origLoadMultiplayerTextChat, location);
-		hook::nop(location, 5);
-
-		// 1737: screwed by Arxan
-		// #TODO1737
+		g_textChat = hook::get_address<void**>(hook::get_pattern("74 04 C6 40 01 01 48 8B 0D", 9));
 	}
+
+	MH_EnableHook(MH_ALL_HOOKS);
 
 	if (!Is372())
 	{
@@ -145,6 +157,71 @@ static hook::cdecl_stub<void(void*)> _textInputBox_loadGfx([]()
 {
 	return hook::get_call(hook::get_pattern("38 59 59 75 05 E8", 5));
 });
+
+static bool (*g_isScWaitingForInit)();
+
+void RunRlInitServicing()
+{
+	if (xbr::IsGameBuildOrGreater<2612>())
+	{
+		((void (*)())hook::get_adjusted(0x140006C38))();
+		((void (*)())hook::get_adjusted(0x1407FB420))();
+		((void (*)())hook::get_adjusted(0x14002778C))();
+		((void (*)(void*))hook::get_adjusted(0x1416135F8))((void*)hook::get_adjusted(0x142E710F0));
+	}
+	else if (xbr::IsGameBuildOrGreater<2545>())
+	{
+		((void (*)())hook::get_adjusted(0x140006A28))();
+		((void (*)())hook::get_adjusted(0x1407FB28C))();
+		((void (*)())hook::get_adjusted(0x1400275C8))();
+		((void (*)(void*))hook::get_adjusted(0x141612950))((void*)hook::get_adjusted(0x142E6F960));
+	}
+	else if (xbr::IsGameBuildOrGreater<2372>())
+	{
+		((void (*)())hook::get_adjusted(0x140006718))();
+		((void (*)())hook::get_adjusted(0x1407F6050))();
+		((void (*)())hook::get_adjusted(0x1400263CC))();
+		((void (*)(void*))hook::get_adjusted(0x14160104C))((void*)hook::get_adjusted(0x142E34900));
+	}
+	else if (!xbr::IsGameBuildOrGreater<2060>())
+	{
+		((void (*)())hook::get_adjusted(0x1400067E8))();
+		((void (*)())hook::get_adjusted(0x1407D1960))();
+		((void (*)())hook::get_adjusted(0x140025F7C))();
+		((void (*)(void*))hook::get_adjusted(0x141595FD4))((void*)hook::get_adjusted(0x142DC9BA0));
+	}
+	else if (xbr::IsGameBuildOrGreater<2189>())
+	{
+		((void (*)())hook::get_adjusted(0x140006748))();
+		((void (*)())hook::get_adjusted(0x1407F4150))();
+		((void (*)())hook::get_adjusted(0x140026120))();
+		((void (*)(void*))hook::get_adjusted(0x1415E4AC8))((void*)hook::get_adjusted(0x142E5C2D0));
+	}
+	else
+	{
+		((void (*)())hook::get_adjusted(0x140006A80))();
+		((void (*)())hook::get_adjusted(0x1407EB39C))();
+		((void (*)())hook::get_adjusted(0x1400263A4))();
+		((void (*)(void*))hook::get_adjusted(0x1415CF268))((void*)hook::get_adjusted(0x142D3DCC0));
+	}
+}
+
+void WaitForRlInit()
+{
+	assert(g_isScWaitingForInit);
+
+	while (g_isScWaitingForInit())
+	{
+		RunRlInitServicing();
+
+		Sleep(0);
+	}
+}
+
+void SetScInitWaitCallback(bool (*cb)())
+{
+	g_isScWaitingForInit = cb;
+}
 
 static InitFunction initFunction([] ()
 {
@@ -172,13 +249,10 @@ static InitFunction initFunction([] ()
 
 			// also early-load MULTIPLAYER_TEXT_CHAT gfx, this changed sometime between 323 and 505
 			// and also causes a blocking load.
-			if (!xbr::IsGameBuildOrGreater<2060>() && g_origLoadMultiplayerTextChat)
+			if (g_origLoadMultiplayerTextChat && g_textChat && *g_textChat)
 			{
-				g_origLoadMultiplayerTextChat();
+				g_origLoadMultiplayerTextChat(*g_textChat);
 			}
-
-			// 1737: screwed by Arxan
-			// #TODO1737
 
 			if (!Is372())
 			{
@@ -214,6 +288,26 @@ static InitFunction initFunction([] ()
 #endif
 
 		assert(!"_assert command used");
+	});
+
+	static ConsoleCommand crashGameCmd("_crash", [](bool game)
+	{
+#ifndef _DEBUG
+		if (Instance<ICoreGameInit>::Get()->GetGameLoaded())
+		{
+			return;
+		}
+#endif
+
+		if (game)
+		{
+			auto gameCrashPattern = hook::pattern("45 33 C9 49 8B D2 48 8B 01 48 FF 60 10").count_hint(2).get(1).get<void>();
+			hook::put<uint8_t>(gameCrashPattern, 0xCC);
+		}
+		else
+		{
+			CrashCommand();
+		}
 	});
 
 	static ConsoleCommand crashCmd("_crash", []()

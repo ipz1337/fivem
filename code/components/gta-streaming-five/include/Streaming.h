@@ -179,13 +179,24 @@ namespace streaming
 		strStreamingModule* GetStreamingModule(int index);
 
 		strStreamingModule* GetStreamingModule(const char* extension);
+
+	private:
+		char pad[16];
+
+	public:
+		atArray<strStreamingModule*> modules;
 	};
 
 	// actually CStreaming
 	class STREAMING_EXPORT Manager
 	{
 	private:
-		inline Manager() {}
+		inline Manager()
+		{
+#ifdef GTA_FIVE
+			static_assert(offsetof(Manager, NumPendingRequests) == 0x1E0);
+#endif
+		}
 
 	public:
 		void RequestObject(uint32_t objectId, int flags);
@@ -230,8 +241,6 @@ namespace streaming
 
 		strStreamingModuleMgr moduleMgr;
 
-		char pad4[32];
-
 		int NumPendingRequests;
 		int NumPendingRequests3;
 		int NumPendingRequestsPrio;
@@ -241,9 +250,11 @@ namespace streaming
 
 	uint32_t STREAMING_EXPORT GetStreamingIndexForName(const std::string& name);
 
-	STREAMING_EXPORT const std::string& GetStreamingNameForIndex(uint32_t index);
+	STREAMING_EXPORT std::string GetStreamingNameForIndex(uint32_t index);
 
-	STREAMING_EXPORT const std::string& GetStreamingBaseNameForHash(uint32_t hash);
+	STREAMING_EXPORT std::string GetStreamingBaseNameForHash(uint32_t hash);
+
+	uint32_t STREAMING_EXPORT GetStreamingIndexForLocalHashKey(streaming::strStreamingModule* module, uint32_t hash);
 
 	STREAMING_EXPORT StreamingPackfileEntry* GetStreamingPackfileByIndex(int index);
 

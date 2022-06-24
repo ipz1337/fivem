@@ -15,6 +15,7 @@
 #include <ICoreGameInit.h>
 #include <gameSkeleton.h>
 
+#include <CoreConsole.h>
 #include <LaunchMode.h>
 #include <CrossBuildRuntime.h>
 
@@ -538,6 +539,24 @@ static const uint64_t* SafeMILookup(void* archetype)
 	return mi;
 }
 
+struct clockInfo
+{
+	char pad[12];
+	int year;
+};
+
+static int (*g_origCalculateLeap)(clockInfo* clock);
+
+static int _calculateLeapFix(clockInfo* clock)
+{
+	if (clock->year > 2025)
+	{
+		clock->year = 2025;
+	}
+
+	return g_origCalculateLeap(clock);
+}
+
 static HookFunction hookFunction{[] ()
 {
 	// CModelInfoStreamingModule LookupModelId null return
@@ -1031,7 +1050,11 @@ static HookFunction hookFunction{[] ()
 	}
 	else
 	{
-		hook::put<uint16_t>(hook::get_pattern("83 E8 12 75 6A 48 8B 03 48 8B CB", 5), 0x76EB);
+		// #TODO2545
+		if (!xbr::IsGameBuildOrGreater<2545>())
+		{
+			hook::put<uint16_t>(hook::get_pattern("83 E8 12 75 6A 48 8B 03 48 8B CB", 5), 0x76EB);
+		}
 	}
 
 	// vehicles.meta explosionInfo field invalidity
@@ -1164,5 +1187,59 @@ static HookFunction hookFunction{[] ()
 	// very hacky patch to not unload base game data from 'vehiclelayouts' CVehicleMetadataMgr
 	VehicleMetadataUnloadMagic();
 
+	// mitigate crazy year corruption causing slowdown in render/timecycle leap year computation
+	MH_CreateHook(hook::get_pattern("BB 6C 07 00 00 33 FF 48", -15), _calculateLeapFix, (void**)&g_origCalculateLeap);
+
 	MH_EnableHook(MH_ALL_HOOKS);
-} };
+
+	// don't fastfail from game CRT code
+	{
+		auto pattern = hook::pattern("B9 ? ? ? ? CD 29").count_hint(3);
+
+		for (size_t i = 0; i < pattern.size(); i++)
+		{
+			// replace with a `ud2` instruction
+			hook::put<uint16_t>(pattern.get(i).get<void>(5), 0x0B0F);
+		}
+	}
+
+	// fix crash caused by lack of nullptr check for CWeaponInfo, introduced as a R* bug in 2545
+	if (xbr::IsGameBuildOrGreater<2545>())
+	{
+		auto location = hook::get_pattern("41 81 7F 10 F3 9C CD 45");
+
+		static struct : jitasm::Frontend
+		{
+			intptr_t location;
+			intptr_t retSuccess;
+			intptr_t retFail;
+
+			void Init(intptr_t location)
+			{
+				this->location = location;
+				this->retSuccess = location + 8;
+				this->retFail = location + 0x37;
+			}
+
+			void InternalMain() override
+			{
+				test(r15, r15); // CWeaponInfo or nullptr, missing in original code
+				jz("fail"); 
+
+				cmp(dword_ptr[r15 + 0x10], 0x45CD9CF3); // original check of weapon_stungun_mp
+				jnz("fail"); 
+
+				mov(rax, retSuccess);
+				jmp(rax);
+
+				L("fail");
+				mov(rax, retFail);
+				jmp(rax);
+			}
+		} patchStub;
+
+		patchStub.Init(reinterpret_cast<intptr_t>(location));
+		hook::nop(location, 8);
+		hook::jump(location, patchStub.GetCode());
+	}
+}};

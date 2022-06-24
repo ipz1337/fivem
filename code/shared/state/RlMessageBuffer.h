@@ -21,7 +21,7 @@ public:
 	}
 
 	inline MessageBuffer(std::vector<uint8_t>&& data)
-		: m_data(std::move(data)), m_curBit(0), m_maxBit(data.size() * 8)
+		: m_data(std::move(data)), m_curBit(0), m_maxBit(m_data.size() * 8)
 	{
 
 	}
@@ -554,12 +554,12 @@ public:
 
 	inline uint32_t GetCurrentBit()
 	{
-		return m_curBit;
+		return std::min(m_curBit, m_maxBit);
 	}
 
 	inline void SetCurrentBit(uint32_t bit)
 	{
-		m_curBit = bit;
+		m_curBit = std::min(bit, uint32_t(m_maxBit));
 	}
 
 	inline bool IsAtEnd()

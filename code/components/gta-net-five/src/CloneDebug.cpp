@@ -25,7 +25,32 @@
 
 #include <Hooking.h>
 
-// REDM1S: not all data from nodes is printed
+inline int MapNetSyncNodeMethod(int offset)
+{
+#ifdef GTA_FIVE
+	if (xbr::IsGameBuildOrGreater<2545>())
+	{
+		// in 2545 there's now 2 calculator functions in common operations,
+		// we need the old one that was added as a new function, mapping it manually.
+		if (offset == 0xB8)
+		{
+			return 0x98;
+		}
+
+		if (offset >= 0x40)
+		{
+			offset += 0x8;
+		}
+
+		if (offset >= 0x88)
+		{
+			offset += 0x8;
+		}
+	}
+#endif
+
+	return offset;
+}
 
 inline size_t GET_NIDX(rage::netSyncTree* tree, void* node)
 {
@@ -111,40 +136,62 @@ namespace rage
 	{
 	public:
 		virtual ~netSyncNodeBase() = 0;
-
 		virtual bool IsDataNode() = 0;
-
 		virtual bool IsParentNode() = 0;
 
+	private:
+		template<typename TMember>
+		inline static TMember get_member(void* ptr)
+		{
+			union member_cast
+			{
+				TMember function;
+				struct
+				{
+					void* ptr;
+					uintptr_t off;
+				};
+			};
+
+			member_cast cast;
+			cast.ptr = ptr;
+			cast.off = 0;
+
+			return cast.function;
+		}
+
+	public:
+#undef FORWARD_FUNC
+#define FORWARD_FUNC(name, offset, ...)           \
+		using TFn = decltype(&netSyncNodeBase::name); \
+		void** vtbl = *(void***)(this);               \
+		return (this->*(get_member<TFn>(vtbl[MapNetSyncNodeMethod(offset) / 8])))(__VA_ARGS__);
+
 #ifdef GTA_FIVE
-		virtual void m_18() = 0;
-		virtual void m_20() = 0;
-		virtual void m_28() = 0;
-		virtual void m_30() = 0;
-		virtual void m_38() = 0;
-		virtual void m_something() = 0; // calls calculatesize, added in a patch
-		virtual void m_40() = 0;
-		virtual void m_48() = 0;
-		virtual void m_50() = 0;
-		virtual void m_58() = 0;
-		virtual uint8_t GetUpdateFrequency(UpdateLevel level) = 0;
-		virtual void m_68() = 0;
-		virtual void m_70() = 0;
-		virtual void m_78() = 0;
-		virtual void m_80() = 0;
-		virtual void m_88() = 0;
-		virtual void m_90() = 0;
-		virtual void m_98() = 0;
-		virtual void m_A0() = 0;
-		virtual void WriteObject(rage::netObject* object, rage::datBitBuffer* buffer, rage::netLogStub* logger, bool readFromObject) = 0;
-		virtual int GetMaximumDataSizeInternal() = 0;
-		virtual void m_B8() = 0;
-		virtual void LogNode(rage::netLogStub* stub) = 0;
-		virtual void m_C8() = 0;
-		virtual void m_D0() = 0;
-		virtual void m_D8() = 0;
-		virtual void m_E0() = 0;
-		virtual void LogObject(rage::netObject* object, rage::netLogStub* stub) = 0;
+		inline uint8_t GetUpdateFrequency(UpdateLevel level)
+		{
+			FORWARD_FUNC(GetUpdateFrequency, 0x68, level);
+		}
+
+		inline void WriteObject(rage::netObject* object, rage::datBitBuffer* buffer, rage::netLogStub* logger, bool readFromObject)
+		{
+			FORWARD_FUNC(WriteObject, 0xB0, object, buffer, logger, readFromObject);
+		}
+
+		inline int GetMaximumDataSizeInternal()
+		{
+			FORWARD_FUNC(GetMaximumDataSizeInternal, 0xB8);
+		}
+
+		inline void LogNode(rage::netLogStub* stub)
+		{
+			FORWARD_FUNC(LogNode, 0xC8, stub);
+		}
+
+		inline void LogObject(rage::netObject* object, rage::netLogStub* stub)
+		{
+			FORWARD_FUNC(LogObject, 0xF0, object, stub);
+		}
 #elif IS_RDR3
 		virtual void m_18() = 0; // InitialiseNode
 		virtual void m_20() = 0; // ShutdownNode
@@ -646,6 +693,13 @@ static void StorePlayerAppearanceDataNode(rage::netSyncNodeBase* node);
 
 bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object, rage::datBitBuffer* buffer, uint32_t time, void* logger, uint8_t targetPlayer, void* outNull, uint32_t* lastChangeTime)
 {
+	auto syncData = g_syncData[object->GetObjectId()].get();
+
+	if (!syncData)
+	{
+		return false;
+	}
+
 	InitTree(this);
 
 	WriteTreeState state;
@@ -690,7 +744,7 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 	eastl::bitset<200> processedNodes;
 
 	// callback
-	auto nodeWriter = [this, sizeLength, &processedNodes](WriteTreeState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
+	auto nodeWriter = [this, sizeLength, syncData, &processedNodes](WriteTreeState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
 	{
 		auto buffer = state.buffer;
 		bool didWrite = false;
@@ -726,7 +780,7 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 			else
 			{
 				// compare last data for the node
-				auto nodeData = &g_syncData[state.object->GetObjectId()]->nodes[nodeIdx];
+				auto nodeData = &syncData->nodes[nodeIdx];
 				uint32_t nodeSyncDelay = GetDelayForUpdateFrequency(node->GetUpdateFrequency(UpdateLevel::VERY_HIGH));
 
 				// throttle sends by waiting for the requested node delay
@@ -734,10 +788,10 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 
 				if (state.pass == 1 && (lastChangeDelta > nodeSyncDelay || nodeData->manuallyDirtied))
 				{
-					auto updateNode = [this, &state, &processedNodes, sizeLength](rage::netSyncDataNodeBase* dataNode, bool force) -> bool
+					auto updateNode = [this, syncData, &state, &processedNodes, sizeLength](rage::netSyncDataNodeBase* dataNode, bool force) -> bool
 					{
 						size_t dataNodeIdx = GET_NIDX(this, dataNode);
-						auto nodeData = &g_syncData[state.object->GetObjectId()]->nodes[dataNodeIdx];
+						auto nodeData = &syncData->nodes[dataNodeIdx];
 
 						if (processedNodes.test(dataNodeIdx))
 						{
@@ -812,7 +866,7 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 							for (int child = 0; child < childCount; child++)
 							{
 								size_t childIdx = GET_NIDX(this, children[child]);
-								auto childData = &g_syncData[state.object->GetObjectId()]->nodes[childIdx];
+								auto childData = &syncData->nodes[childIdx];
 
 								written |= updateNode(children[child], nodeData->manuallyDirtied || childData->manuallyDirtied || written);
 							}
@@ -973,13 +1027,20 @@ struct AckState
 
 void netSyncTree::AckCfx(netObject* object, uint32_t timestamp)
 {
+	auto syncData = g_syncData[object->GetObjectId()].get();
+
+	if (!syncData)
+	{
+		return;
+	}
+
 	InitTree(this);
 
 	AckState state;
 	state.object = object;
 	state.time = timestamp;
 
-	TraverseTree<AckState>(this, state, [this](AckState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
+	TraverseTree<AckState>(this, state, [this, syncData](AckState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
 	{
 		if (node->IsParentNode())
 		{
@@ -989,9 +1050,9 @@ void netSyncTree::AckCfx(netObject* object, uint32_t timestamp)
 		{
 			size_t nodeIdx = GET_NIDX(this, node);
 
-			if (state.time > g_syncData[state.object->GetObjectId()]->nodes[nodeIdx].lastAck)
+			if (state.time > syncData->nodes[nodeIdx].lastAck)
 			{
-				g_syncData[state.object->GetObjectId()]->nodes[nodeIdx].lastAck = state.time;
+				syncData->nodes[nodeIdx].lastAck = state.time;
 			}
 		}
 
@@ -1091,7 +1152,9 @@ void RenderNetDrilldownWindow()
 
 		if (g_recordingDrilldown)
 		{
-			ImGui::ButtonEx("Recording", {}, ImGuiButtonFlags_Disabled);
+			ImGui::BeginDisabled();
+			ImGui::Button("Recording");
+			ImGui::EndDisabled();
 		}
 
 		if (g_recordedDrilldown)
@@ -1228,7 +1291,14 @@ void RenderSyncNodeDetail(rage::netObject* netObject, rage::netSyncNodeBase* nod
 	auto t = g_netObjectNodeMapping[netObject->GetObjectId()][node];
 
 	InitTree(netObject->GetSyncTree());
-	auto& sd = rage::g_syncData[netObject->GetObjectId()]->nodes[GET_NIDX(netObject->GetSyncTree(), node)];
+	const auto& snd = rage::g_syncData[netObject->GetObjectId()];
+
+	if (!snd)
+	{
+		return;
+	}
+
+	const auto& sd = snd->nodes[GET_NIDX(netObject->GetSyncTree(), node)];
 
 	ImGui::Text("Last %s: %d ms ago", std::get<int>(t) ? "written" : "read", rage::netInterface_queryFunctions::GetInstance()->GetTimestamp() - std::get<uint32_t>(t));
 	ImGui::Text("Last ack: %d ms ago", rage::netInterface_queryFunctions::GetInstance()->GetTimestamp() - sd.lastAck);
@@ -1284,11 +1354,33 @@ static InitFunction initFunction([]()
 
 	ConHost::OnShouldDrawGui.Connect([](bool* should)
 	{
-		*should = *should || netViewerEnabled || timeWindowEnabled || drilldownWindowEnabled;
+		*should = *should || netViewerEnabled || timeWindowEnabled || drilldownWindowEnabled || g_captureSyncLog;
 	});
 
 	ConHost::OnDrawGui.Connect([]()
 	{
+		if (g_captureSyncLog)
+		{
+			const float DISTANCE = 10.0f;
+			ImVec2 window_pos = ImVec2(ImGui::GetMainViewport()->Pos.x + ImGui::GetIO().DisplaySize.x - DISTANCE, ImGui::GetMainViewport()->Pos.y + ImGui::GetIO().DisplaySize.y - DISTANCE);
+			ImVec2 window_pos_pivot = ImVec2(1.0f, 1.0f);
+			ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
+
+			ImGui::SetNextWindowBgAlpha(0.3f); // Transparent background
+			if (ImGui::Begin("Net Warning", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav))
+			{
+				ImGui::Text("/!\\ Performance warning");
+				ImGui::Separator();
+				ImGui::Text("The 'netobjviewer_syncLog' setting is enabled, which may lead to reduced performance\n"
+					        "in busy parts of the game world."
+					        "\n\n"
+					        "Disable it by using `netobjviewer_syncLog 0` in the F8 console, or by using F8 -> Tools\n"
+					        "-> Network -> OneSync -> Network SyncLog.");
+			}
+
+			ImGui::End();
+		}
+
 		if (drilldownWindowEnabled)
 		{
 			RenderNetDrilldownWindow();

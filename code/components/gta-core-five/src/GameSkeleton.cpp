@@ -1,14 +1,13 @@
 #include "StdInc.h"
 #include "Hooking.h"
 
-#include <ETWProviders/etwprof.h>
-
 #include <optick.h>
 
 #include <gameSkeleton.h>
 #include <Error.h>
 
 #include <ICoreGameInit.h>
+#include <CrossBuildRuntime.h>
 
 static std::unordered_map<uint32_t, std::string> g_initFunctionNames;
 
@@ -51,6 +50,11 @@ namespace rage
 		if (exception->ExceptionRecord->ExceptionCode & 0x80000000)
 		{
 			AddCrashometry("init_function", "%s:%s", InitFunctionTypeToString(type), func->GetName());
+
+			if (IsErrorException(exception))
+			{
+				return EXCEPTION_CONTINUE_SEARCH;
+			}
 
 			if ((uintptr_t)exception->ExceptionRecord->ExceptionAddress >= hook::get_adjusted(0x140000000) &&
 				(uintptr_t)exception->ExceptionRecord->ExceptionAddress < hook::get_adjusted(0x146000000))
@@ -113,8 +117,6 @@ namespace rage
 						if (OnInitFunctionInvoking(type, i, func))
 						{
 							trace(__FUNCTION__ ": Invoking %s %s init (%i out of %i)\n", func.GetName(), InitFunctionTypeToString(type), i + 1, entry->functions.GetCount());
-
-							CETWScope scope(va("%s %s", func.GetName(), InitFunctionTypeToString(type)));
 
 							assert(func.TryInvoke(type));
 						}
@@ -224,7 +226,7 @@ static HookFunction hookFunction([] ()
 	}
 
 	{
-		hook::jump(hook::get_call(hook::get_pattern("48 8D 0D ? ? ? ? BA 01 00 00 00 E8 ? ? ? ? E8 ? ? ? ?", 12)), hook::get_member(&rage::gameSkeleton::RunUpdate));
+		hook::jump(hook::get_call(hook::get_pattern("48 8D 0D ? ? ? ? BA 02 00 00 00 84 DB 75 05", -17)), hook::get_member(&rage::gameSkeleton::RunUpdate));
 	}
 
 	hook::jump(hook::get_pattern("40 53 48 83 EC 20 48 8B 59 20 EB 0D 48 8B 03 48"), hook::get_member(&rage::gameSkeleton_updateBase::RunGroup));

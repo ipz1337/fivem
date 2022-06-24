@@ -1,12 +1,15 @@
 #include <StdInc.h>
 #include <StateBagComponent.h>
 
+#include <ResourceManager.h>
+
 #include <shared_mutex>
 #include <unordered_set>
 
 #include <EASTL/fixed_set.h>
 #include <EASTL/fixed_vector.h>
 
+#include <SharedFunction.h>
 #include <state/RlMessageBuffer.h>
 
 namespace fx
@@ -55,12 +58,20 @@ public:
 
 	std::shared_ptr<StateBag> PreCreateStateBag(std::string_view id);
 
+	inline StateBagGameInterface* GetGameInterface() const
+	{
+		return m_gameInterface;
+	}
+
 private:
 	StateBagGameInterface* m_gameInterface;
 
 	StateBagRole m_role;
 
 	std::unordered_set<int> m_targets;
+
+	std::unordered_set<std::string> m_erasureList;
+	std::shared_mutex m_erasureMutex;
 
 	// TODO: evaluate transparent usage when we switch to C++20 compiler modes
 	std::unordered_map<std::string, std::weak_ptr<StateBagImpl>> m_stateBags;
@@ -99,6 +110,11 @@ public:
 	void SendKeyAll(std::string_view key);
 
 	void SendAll(int target);
+
+	void SendAllInitial(int target);
+
+private:
+	void SetKeyInternal(int source, std::string_view key, std::string_view data, bool replicated);
 
 private:
 	StateBagComponentImpl* m_parent;
@@ -139,10 +155,20 @@ std::optional<std::string> StateBagImpl::GetKey(std::string_view key)
 
 void StateBagImpl::SetKey(int source, std::string_view key, std::string_view data, bool replicated /* = true */)
 {
+	// prepare a potentially async continuation
+	auto thisRef = shared_from_this();
+
+	auto continuation = [thisRef, source, replicated](std::string_view key, std::string_view data)
+	{
+		static_cast<StateBagImpl*>(thisRef.get())->SetKeyInternal(source, key, data, replicated);
+	};
+
 	const auto& sbce = m_parent->OnStateBagChange;
 
 	if (sbce)
 	{
+		// #TODOPERF: this will unconditionally unpack and call into svMain if *any* change handler is reg'd
+		// -> ideally we'd have a separate event so we can poll if there's a match for script filters before doing this
 		msgpack::unpacked up;
 
 		try
@@ -154,12 +180,46 @@ void StateBagImpl::SetKey(int source, std::string_view key, std::string_view dat
 			return;
 		}
 
+		auto gameInterface = m_parent->GetGameInterface();
+
+		if (gameInterface->IsAsynchronous())
+		{
+			const auto& id = m_id;
+			auto parent = m_parent;
+			std::string keyStr{ key };
+			std::string dataStr{ data };
+
+			gameInterface->QueueTask(make_shared_function([
+				parent,
+				source,
+				replicated,
+				id,
+				continuation = std::move(continuation),
+				key = std::move(keyStr),
+				data = std::move(dataStr),
+				up = std::move(up)
+			]()
+			{
+				if (parent->OnStateBagChange(source, id, key, up.get(), replicated))
+				{
+					continuation(key, data);
+				}
+			}));
+
+			return;
+		}
+
 		if (!sbce(source, m_id, key, up.get(), replicated))
 		{
 			return;
 		}
 	}
 
+	continuation(key, data);
+}
+
+void StateBagImpl::SetKeyInternal(int source, std::string_view key, std::string_view data, bool replicated)
+{
 	std::string lastValue;
 
 	{
@@ -212,6 +272,19 @@ void StateBagImpl::SendAll(int target)
 	{
 		SendKey(target, key);
 	}
+}
+
+void StateBagImpl::SendAllInitial(int target)
+{
+	{
+		std::shared_lock _(m_routingTargetsMutex);
+		if (!m_routingTargets.empty() && m_routingTargets.find(target) == m_routingTargets.end())
+		{
+			return;
+		}
+	}
+
+	SendAll(target);
 }
 
 void StateBagImpl::SendKeyAll(std::string_view key)
@@ -321,6 +394,7 @@ void StateBagComponentImpl::SetGameInterface(StateBagGameInterface* gi)
 std::shared_ptr<StateBag> StateBagComponentImpl::RegisterStateBag(std::string_view id)
 {
 	std::shared_ptr<StateBagImpl> bag;
+	std::string strId{ id };
 
 	{
 		std::unique_lock lock(m_mapMutex);
@@ -345,7 +419,12 @@ std::shared_ptr<StateBag> StateBagComponentImpl::RegisterStateBag(std::string_vi
 
 		// *only* start making a new one here as otherwise we'll delete the existing bag
 		bag = std::make_shared<StateBagImpl>(this, id);
-		m_stateBags[std::string{ id }] = bag;
+		m_stateBags[strId] = bag;
+	}
+
+	{
+		std::unique_lock _(m_erasureMutex);
+		m_erasureList.erase(strId);
 	}
 
 	return bag;
@@ -353,8 +432,8 @@ std::shared_ptr<StateBag> StateBagComponentImpl::RegisterStateBag(std::string_vi
 
 void StateBagComponentImpl::UnregisterStateBag(std::string_view id)
 {
-	std::unique_lock lock(m_mapMutex);
-	m_stateBags.erase(std::string{ id });
+	std::unique_lock _(m_erasureMutex);
+	m_erasureList.emplace(id);
 }
 
 std::shared_ptr<StateBag> StateBagComponentImpl::GetStateBag(std::string_view id)
@@ -390,7 +469,7 @@ void StateBagComponentImpl::RegisterTarget(int id)
 
 			if (entry)
 			{
-				entry->SendAll(id);
+				entry->SendAllInitial(id);
 			}
 		}
 	}
@@ -447,7 +526,38 @@ std::shared_ptr<StateBag> StateBagComponentImpl::PreCreateStateBag(std::string_v
 
 void StateBagComponentImpl::AttachToObject(fx::ResourceManager* object)
 {
+	object->OnTick.Connect([this]()
+	{
+		bool isEmpty = true;
 
+		{
+			std::shared_lock _(m_erasureMutex);
+			isEmpty = m_erasureList.empty();
+		}
+
+		if (isEmpty)
+		{
+			return;
+		}
+
+		decltype(m_erasureList) erasureList;
+
+		{
+			std::unique_lock _(m_erasureMutex);
+			erasureList = std::move(m_erasureList);
+		}
+
+		if (!erasureList.empty())
+		{
+			std::unique_lock lock(m_mapMutex);
+
+			for (const auto& id : erasureList)
+			{
+				m_stateBags.erase(id);
+			}
+		}
+	},
+	INT32_MIN);
 }
 
 void StateBagComponentImpl::HandlePacket(int source, std::string_view dataRaw)
@@ -491,6 +601,11 @@ void StateBagComponentImpl::HandlePacket(int source, std::string_view dataRaw)
 
 	// read data
 	size_t dataLength = (buffer.GetLength() * 8) - buffer.GetCurrentBit();
+
+	if (dataLength == 0)
+	{
+		return;
+	}
 
 	std::vector<uint8_t> data(dataLength / 8);
 	buffer.ReadBits(data.data(), dataLength);

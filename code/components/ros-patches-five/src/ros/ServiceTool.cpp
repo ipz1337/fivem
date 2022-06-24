@@ -88,6 +88,11 @@ SC_HANDLE OpenServiceWHook(_In_ SC_HANDLE hSCManager, _In_ LPCWSTR lpServiceName
 	return (SC_HANDLE)4096;
 }
 
+BOOL CloseServiceHandleHook(_In_ SC_HANDLE hSCObject)
+{
+	return TRUE;
+}
+
 BOOL StartServiceCtrlDispatcherWHook(_In_ CONST SERVICE_TABLE_ENTRYW* lpServiceStartTable)
 {
 	const wchar_t* a = L"";
@@ -133,7 +138,52 @@ HANDLE CreateFileMappingAHook(_In_ HANDLE hFile, _In_opt_ LPSECURITY_ATTRIBUTES 
 	return CreateFileMappingA(hFile, lpFileMappingAttributes, flProtect, dwMaximumSizeHigh, dwMaximumSizeLow, lpName);
 }
 
+BOOL SetFileSecurityWHook(LPCWSTR lpFileName, SECURITY_INFORMATION SecurityInformation, PSECURITY_DESCRIPTOR pSecurityDescriptor)
+{
+	SetLastError(0);
+	return TRUE;
+}
+
+BOOL AccessCheckHook( _In_ PSECURITY_DESCRIPTOR pSecurityDescriptor, _In_ HANDLE ClientToken, _In_ DWORD DesiredAccess, _In_ PGENERIC_MAPPING GenericMapping, _Out_writes_bytes_to_opt_(*PrivilegeSetLength,*PrivilegeSetLength) PPRIVILEGE_SET PrivilegeSet, _Inout_ LPDWORD PrivilegeSetLength, _Out_ LPDWORD GrantedAccess, _Out_ LPBOOL AccessStatus )
+{
+	*AccessStatus = TRUE;
+
+	SetLastError(0);
+	return TRUE;
+}
+
 extern HINSTANCE __stdcall ShellExecuteWStub(_In_opt_ HWND hwnd, _In_opt_ LPCWSTR lpOperation, _In_ LPCWSTR lpFile, _In_opt_ LPCWSTR lpParameters, _In_opt_ LPCWSTR lpDirectory, _In_ INT nShowCmd);
+extern LONG __stdcall WinVerifyTrustStub(HWND hwnd, GUID* pgActionID, LPVOID pWVTData);
+
+static std::vector<std::tuple<const char*, void*, const char*>> g_serviceHooks = {
+	{ "advapi32.dll", StartServiceCtrlDispatcherWHook, "StartServiceCtrlDispatcherW" },
+	{ "advapi32.dll", SetServiceStatusHook, "SetServiceStatus" },
+	{ "advapi32.dll", RegisterServiceCtrlHandlerExWHook, "RegisterServiceCtrlHandlerExW" },
+	{ "advapi32.dll", AccessCheckHook, "AccessCheck" },
+	{ "advapi32.dll", SetFileSecurityWHook, "SetFileSecurityW" },
+	{ "kernel32.dll", GetCommandLineWHook, "GetCommandLineW" },
+	{ "kernel32.dll", CreateNamedPipeAHook, "CreateNamedPipeA" },
+	{ "kernel32.dll", CreateFileMappingAHook, "CreateFileMappingA" },
+	{ "advapi32.dll", QueryServiceStatusExHook, "QueryServiceStatusEx" },
+	{ "advapi32.dll", OpenServiceWHook, "OpenServiceW" },
+	{ "advapi32.dll", CloseServiceHandleHook, "CloseServiceHandle" },
+	{ "advapi32.dll", QueryServiceConfigWHook, "QueryServiceConfigW" },
+	{ "shell32.dll", ShellExecuteWStub, "ShellExecuteW" },
+	{ "wintrust.dll", WinVerifyTrustStub, "WinVerifyTrust" },
+};
+
+static FARPROC GetProcAddressHook(HMODULE hModule, LPCSTR funcName)
+{
+	for (const auto& h : g_serviceHooks)
+	{
+		if (strcmp(std::get<2>(h), funcName) == 0)
+		{
+			return (FARPROC)std::get<1>(h);
+		}
+	}
+
+	return GetProcAddress(hModule, funcName);
+}
 
 static void Service_Run(const boost::program_options::variables_map& map)
 {
@@ -146,16 +196,12 @@ static void Service_Run(const boost::program_options::variables_map& map)
 
 	ToolMode_SetPostLaunchRoutine([]()
 	{
-		hook::iat("advapi32.dll", StartServiceCtrlDispatcherWHook, "StartServiceCtrlDispatcherW");
-		hook::iat("advapi32.dll", SetServiceStatusHook, "SetServiceStatus");
-		hook::iat("advapi32.dll", RegisterServiceCtrlHandlerExWHook, "RegisterServiceCtrlHandlerExW");
-		hook::iat("kernel32.dll", GetCommandLineWHook, "GetCommandLineW");
-		hook::iat("kernel32.dll", CreateNamedPipeAHook, "CreateNamedPipeA");
-		hook::iat("kernel32.dll", CreateFileMappingAHook, "CreateFileMappingA");
-		hook::iat("advapi32.dll", QueryServiceStatusExHook, "QueryServiceStatusEx");
-		hook::iat("advapi32.dll", OpenServiceWHook, "OpenServiceW");
-		hook::iat("advapi32.dll", QueryServiceConfigWHook, "QueryServiceConfigW");
-		hook::iat("shell32.dll", ShellExecuteWStub, "ShellExecuteW");
+		hook::iat("kernel32.dll", GetProcAddressHook, "GetProcAddress");
+
+		for (const auto& h : g_serviceHooks)
+		{
+			hook::iat(std::get<0>(h), std::get<1>(h), std::get<2>(h));
+		}
 	});
 
 	auto mutex = CreateMutexW(NULL, TRUE, va(L"Cfx_ROSServiceMutex_%s", ToWide(launch::GetLaunchModeKey())));

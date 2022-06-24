@@ -109,7 +109,7 @@ struct GameCacheEntry
 	// methods
 	bool IsPrimitiveFile() const
 	{
-		return std::string(filename).find("ros_") == 0 || std::string(filename).find("launcher/") == 0;
+		return std::string_view{ filename }.find("ros_") == 0 || std::string_view{ filename }.find("launcher/") == 0;
 	}
 
 	std::wstring GetCacheFileName() const
@@ -137,39 +137,45 @@ struct GameCacheEntry
 
 	std::wstring GetLocalFileName() const
 	{
-		using namespace std::string_literals;
-
 		if (_strnicmp(filename, "launcher/", 9) == 0)
 		{
-			wchar_t rootBuf[1024] = { 0 };
-			DWORD rootLength = sizeof(rootBuf);
+			static auto mtlPath = ([]()
+			{
+				wchar_t rootBuf[1024] = { 0 };
+				DWORD rootLength = sizeof(rootBuf);
 
-			RegGetValue(HKEY_LOCAL_MACHINE,
+				RegGetValue(HKEY_LOCAL_MACHINE,
 				L"SOFTWARE\\WOW6432Node\\Rockstar Games\\Launcher", L"InstallFolder",
 				RRF_RT_REG_SZ, nullptr, rootBuf, &rootLength);
+				
+				return std::wstring{ rootBuf };
+			})();
 
-			return rootBuf + L"\\"s + ToWide(&filename[9]);
+			return mtlPath + L"\\" + ToWide(&filename[9]);
 		}
 
 		if (_strnicmp(filename, "ros_", 4) == 0)
 		{
-			LPWSTR rootPath;
-			if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &rootPath)))
+			static auto scPath = ([]() -> std::wstring
 			{
-				std::wstring pathRef = rootPath;
-				CoTaskMemFree(rootPath);
+				LPWSTR rootPath;
+				if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &rootPath)))
+				{
+					std::wstring pathRef = rootPath;
+					CoTaskMemFree(rootPath);
 
-				return pathRef + L"\\Rockstar Games\\Social Club\\"s + ToWide(strchr(filename, L'/') + 1);
-			}
+					return pathRef;
+				}
 
-			wchar_t rootBuf[1024] = { 0 };
-			DWORD rootLength = sizeof(rootBuf);
+				wchar_t rootBuf[1024] = { 0 };
+				DWORD rootLength = sizeof(rootBuf);
 
-			RegGetValue(HKEY_LOCAL_MACHINE,
+				RegGetValue(HKEY_LOCAL_MACHINE,
 				L"SOFTWARE\\WOW6432Node\\Rockstar Games\\Rockstar Games Social Club", L"InstallFolder",
 				RRF_RT_REG_SZ, nullptr, rootBuf, &rootLength);
+			})();
 
-			return rootBuf + L"\\"s + ToWide(&filename[9]);
+			return scPath + L"\\" + ToWide(strchr(filename, L'/') + 1);
 		}
 
 		return MakeRelativeGamePath(ToWide(filename));
@@ -207,11 +213,6 @@ struct GameCacheStorageEntry
 static std::vector<GameCacheEntry> g_requiredEntries =
 {
 #if defined(GTA_FIVE)
-	//{ "GTA5.exe", "79a272830be65afae4acd520bfbfe176e0b142f3", "https://runtime.fivem.net/patches/GTA_V_Patch_1_0_1737_0.exe", "$/GTA5.exe", 77631632, 1189307336 },
-	//{ "update/update.rpf", "8a98e0879b91661dd2aa23f86abdf91ee741b237", "https://runtime.fivem.net/patches/GTA_V_Patch_1_0_1737_0.exe", "$/update/update.rpf", 1171902464, 1189307336 },
-
-	//{ L"update/update.rpf", "c819ecc1df08f3a90bc144fce0bba08bb7b6f893", "nope:https://runtime.fivem.net/patches/dlcpacks/patchday4ng/dlc.rpfupdate.rpf", 560553984 },
-	//{ "update/update.rpf", "319d867a44746885427d9c40262e9d735cd2a169", "Game_EFIGS/GTA_V_Patch_1_0_1011_1.exe", "$/update/update.rpf", 701820928, SIZE_MAX },
 	{ "update/x64/dlcpacks/patchday4ng/dlc.rpf", "124c908d82724258a5721535c87f1b8e5c6d8e57", "nope:https://runtime.fivem.net/patches/dlcpacks/patchday4ng/dlc.rpfpatchday4ng/dlc.rpf", 312438784 },
 	{ "update/x64/dlcpacks/mpluxe/dlc.rpf", "78f7777b49f4b4d77e3da6db728cb3f7ec51e2fc", "nope:https://runtime.fivem.net/patches/dlcpacks/patchday4ng/dlc.rpfmpluxe/dlc.rpf", 226260992 },
 
@@ -288,128 +289,15 @@ static std::vector<GameCacheEntry> g_requiredEntries =
 #endif
 
 #if defined(_M_AMD64)
-	{ "launcher/api-ms-win-core-console-l1-1-0.dll", "724F4F91041AD595E365B724A0348C83ACF12BBB", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-console-l1-1-0.dll", 19208 },
-	{ "launcher/api-ms-win-core-datetime-l1-1-0.dll", "4940D5B92B6B80A40371F8DF073BF3EB406F5658", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-datetime-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-debug-l1-1-0.dll", "E7C8A6C29C3158F8B332EEA5C33C3B1E044B5F73", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-debug-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-errorhandling-l1-1-0.dll", "51CBB7BA47802DC630C2507750432C55F5979C27", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-errorhandling-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-file-l1-1-0.dll", "9ACBEEF0AC510C179B319CA69CD5378D0E70504D", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-file-l1-1-0.dll", 22280 },
-	{ "launcher/api-ms-win-core-file-l1-2-0.dll", "04669214375B25E2DC8A3635484E6EEB206BC4EB", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-file-l1-2-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-file-l2-1-0.dll", "402B7B8F8DCFD321B1D12FC85A1EE5137A5569B2", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-file-l2-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-handle-l1-1-0.dll", "A2E2A40CEA25EA4FD64B8DEAF4FBE4A2DB94107A", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-handle-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-heap-l1-1-0.dll", "B4310929CCB82DD3C3A779CAB68F1F9F368076F2", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-heap-l1-1-0.dll", 19208 },
-	{ "launcher/api-ms-win-core-interlocked-l1-1-0.dll", "F779CDEF9DED19402AA72958085213D6671CA572", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-interlocked-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-libraryloader-l1-1-0.dll", "47143A66B4A2E2BA019BF1FD07BCCA9CFB8BB117", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-libraryloader-l1-1-0.dll", 19720 },
-	{ "launcher/api-ms-win-core-localization-l1-2-0.dll", "9874398548891F6A08FC06437996F84EB7495783", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-localization-l1-2-0.dll", 21256 },
-	{ "launcher/api-ms-win-core-memory-l1-1-0.dll", "9C03356CF48112563BB845479F40BF27B293E95E", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-memory-l1-1-0.dll", 19208 },
-	{ "launcher/api-ms-win-core-namedpipe-l1-1-0.dll", "CB59F1FE73C17446EB196FC0DD7D944A0CD9D81F", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-namedpipe-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-processenvironment-l1-1-0.dll", "2745259F4DBBEFBF6B570EE36D224ABDB18719BC", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-processenvironment-l1-1-0.dll", 19720 },
-	{ "launcher/api-ms-win-core-processthreads-l1-1-0.dll", "50699041060D14576ED7BACBD44BE9AF80EB902A", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-processthreads-l1-1-0.dll", 20744 },
-	{ "launcher/api-ms-win-core-processthreads-l1-1-1.dll", "0BFFB9ED366853E7019452644D26E8E8F236241B", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-processthreads-l1-1-1.dll", 19208 },
-	{ "launcher/api-ms-win-core-profile-l1-1-0.dll", "E7E0B18A40A35BD8B0766AC72253DE827432E148", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-profile-l1-1-0.dll", 18184 },
-	{ "launcher/api-ms-win-core-rtlsupport-l1-1-0.dll", "24F37D46DFC0EF303EF04ABF9956241AF55D25C9", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-rtlsupport-l1-1-0.dll", 19208 },
-	{ "launcher/api-ms-win-core-string-l1-1-0.dll", "637E4A9946691F76E6DEB69BDC21C210921D6F07", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-string-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-core-synch-l1-1-0.dll", "5584C189216A17228CCA6CD07037AAA9A8603241", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-synch-l1-1-0.dll", 20744 },
-	{ "launcher/api-ms-win-core-synch-l1-2-0.dll", "A9AEBBBB73B7B846B051325D7572F2398F5986EE", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-synch-l1-2-0.dll", 19208 },
-	{ "launcher/api-ms-win-core-sysinfo-l1-1-0.dll", "F20AE25484A1C1B43748A1F0C422F48F092AD2C1", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-sysinfo-l1-1-0.dll", 19720 },
-	{ "launcher/api-ms-win-core-timezone-l1-1-0.dll", "4BF13DB65943E708690D6256D7DDD421CC1CC72B", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-timezone-l1-1-0.dll", 19208 },
-	{ "launcher/api-ms-win-core-util-l1-1-0.dll", "1E1A5AB47E4C2B3C32C81690B94954B7612BB493", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-core-util-l1-1-0.dll", 18696 },
-	{ "launcher/api-ms-win-crt-conio-l1-1-0.dll", "49002B58CB0DF2EE8D868DEC335133CF225657DF", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-conio-l1-1-0.dll", 19720 },
-	{ "launcher/api-ms-win-crt-convert-l1-1-0.dll", "C84E41FDCC4CA89A76AE683CB390A9B86500D3CA", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-convert-l1-1-0.dll", 22792 },
-	{ "launcher/api-ms-win-crt-environment-l1-1-0.dll", "9A4818897251CACB7FE1C6FE1BE3E854985186AD", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-environment-l1-1-0.dll", 19208 },
-	{ "launcher/api-ms-win-crt-filesystem-l1-1-0.dll", "78FA03C89EA12FF93FA499C38673039CC2D55D40", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-filesystem-l1-1-0.dll", 20744 },
-	{ "launcher/api-ms-win-crt-heap-l1-1-0.dll", "60B4CF246C5F414FC1CD12F506C41A1043D473EE", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-heap-l1-1-0.dll", 19720 },
-	{ "launcher/api-ms-win-crt-locale-l1-1-0.dll", "9C1DF49A8DBDC8496AC6057F886F5C17B2C39E3E", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-locale-l1-1-0.dll", 19208 },
-	{ "launcher/api-ms-win-crt-math-l1-1-0.dll", "8B35EC4676BD96C2C4508DC5F98CA471B22DEED7", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-math-l1-1-0.dll", 27912 },
-	{ "launcher/api-ms-win-crt-multibyte-l1-1-0.dll", "91EEF52C557AEFD0FDE27E8DF4E3C3B7F99862F2", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-multibyte-l1-1-0.dll", 26888 },
-	{ "launcher/api-ms-win-crt-private-l1-1-0.dll", "0C33CFE40EDD278A692C2E73E941184FD24286D9", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-private-l1-1-0.dll", 71432 },
-	{ "launcher/api-ms-win-crt-process-l1-1-0.dll", "EC96F7BEEAEC14D3B6C437B97B4A18A365534B9B", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-process-l1-1-0.dll", 19720 },
-	{ "launcher/api-ms-win-crt-runtime-l1-1-0.dll", "A19ACEFA3F95D1B565650FDBC40EF98C793358E9", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-runtime-l1-1-0.dll", 23304 },
-	{ "launcher/api-ms-win-crt-stdio-l1-1-0.dll", "982B5DA1C1F5B9D74AF6243885BCBA605D54DF8C", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-stdio-l1-1-0.dll", 24840 },
-	{ "launcher/api-ms-win-crt-string-l1-1-0.dll", "7F389E6F2D6E5BEB2A3BAF622A0C0EA24BC4DE60", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-string-l1-1-0.dll", 24840 },
-	{ "launcher/api-ms-win-crt-time-l1-1-0.dll", "EE815A158BAACB357D9E074C0755B6F6C286B625", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-time-l1-1-0.dll", 21256 },
-	{ "launcher/api-ms-win-crt-utility-l1-1-0.dll", "EAA07829D012206AC55FB1AF5CC6A35F341D22BE", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/api-ms-win-crt-utility-l1-1-0.dll", 19208 },
-	{ "launcher/Launcher.exe", "9AB0848E89FCAA7D1AB34BBC7E6B02461652950A", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/Launcher.exe", 42820736 },
-	{ "launcher/Launcher.rpf", "A84622EE990F8CF16F15E4347926FB57C9747018", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/Launcher.rpf", 831488 },
-	{ "launcher/mtl_libovr.dll", "3AADE10DBF3C51233AA701AD1E12CD17A9DCB722", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/mtl_libovr.dll", 190952 },
-	{ "launcher/offline.pak", "4F52E60E1580CD5F44FFACFCDAEA6A78E08FC29D", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/offline.pak", 2087267 },
-	{ "launcher/RockstarService.exe", "4C384774618ACE14700A13E7D35233B6F37B73A9", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/RockstarService.exe", 1631360 },
-	{ "launcher/RockstarSteamHelper.exe", "0B957C26F151D33248CE0EBEA91BC9B51DB0B943", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/RockstarSteamHelper.exe", 1131136 },
-	{ "launcher/ucrtbase.dll", "4189F4459C54E69C6D3155A82524BDA7549A75A6", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/ucrtbase.dll", 1016584 },
-	{ "launcher/ThirdParty/Epic/EOSSDK-Win64-Shipping.dll", "AF01787DDB7DE00239EDC62D33E0B20C0BE80037", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/ThirdParty/Epic/EOSSDK-Win64-Shipping.dll", 9971968 },
-	{ "launcher/ThirdParty/Steam/steam_api64.dll", "BD014660F7978A07BA2F99B6CF0621D678602663", "https://content.cfx.re/mirrors/emergency_mirror/launcher_1_0_33_319/launcher/ThirdParty/Steam/steam_api64.dll", 121256 },
-	{ "ros_2090/cef_100_percent.pak", "ED87BD499CAE74A748E03FC33C36476A20487B78", "https://content.cfx.re/mirrors/ros/2.0.9.0/cef_100_percent.pak", 267314 },
-	{ "ros_2090/cef_200_percent.pak", "ACB1F69B2F0A69D301E6816C5D886F1C10A1BDD9", "https://content.cfx.re/mirrors/ros/2.0.9.0/cef_200_percent.pak", 421955 },
-	{ "ros_2090/cef.pak", "7C95336432AF2E47D4B05D3B55FFE733B34F32F6", "https://content.cfx.re/mirrors/ros/2.0.9.0/cef.pak", 1949064 },
-	{ "ros_2090/chrome_elf.dll", "2DB73805F775C8108E919AA521505EC4E3A11781", "https://content.cfx.re/mirrors/ros/2.0.9.0/chrome_elf.dll", 999320 },
-	{ "ros_2090/d3dcompiler_47.dll", "59A6C4B0D07496A348409268D7B8A6A1CE227BCE", "https://content.cfx.re/mirrors/ros/2.0.9.0/d3dcompiler_47.dll", 4337048 },
-	{ "ros_2090/icudtl.dat", "6BAB2E77925515888808C1EF729C5BB1323100DD", "https://content.cfx.re/mirrors/ros/2.0.9.0/icudtl.dat", 10518160 },
-	{ "ros_2090/libcef.dll", "0D84700E9A387F406164AF17A31BA3F9A498F690", "https://content.cfx.re/mirrors/ros/2.0.9.0/libcef.dll.xz", 132978072, 41881436 },
-	{ "ros_2090/libEGL.dll", "773E2B9A198328864C297D0FE2CCD432C8BE9F0D", "https://content.cfx.re/mirrors/ros/2.0.9.0/libEGL.dll", 399256 },
-	{ "ros_2090/libGLESv2.dll", "BE29C61C4EFFA651B7C93ADB22472228EAC188B6", "https://content.cfx.re/mirrors/ros/2.0.9.0/libGLESv2.dll", 8056728 },
-	{ "ros_2090/scui.pak", "97B9B65F2E0712E69ED68920CC4B78B4F35B998F", "https://content.cfx.re/mirrors/ros/2.0.9.0/scui.pak", 3420268 },
-	{ "ros_2090/snapshot_blob.bin", "2257920539464F2E361348A83F044E2943622165", "https://content.cfx.re/mirrors/ros/2.0.9.0/snapshot_blob.bin", 51261 },
 	{ "ros_2090/socialclub.dll", "AE14687363C0FB5A8B086B4EB24D5A6E2D5161B9", "https://content.cfx.re/mirrors/ros/2.0.9.0/socialclub.dll", 5287320 },
 	{ "ros_2090/socialclub.pak", "D70F269F7EBBA3A13AA2871BAFA58212B01E6280", "https://content.cfx.re/mirrors/ros/2.0.9.0/socialclub.pak", 4996 },
+
+	// RDR3 expects these to exist for SC SDK init to succeed
+#ifdef IS_RDR3
 	{ "ros_2090/SocialClubD3D12Renderer.dll", "73A1421E35B5ED105FA9AF8445F62F0A42EE3C41", "https://content.cfx.re/mirrors/ros/2.0.9.0/SocialClubD3D12Renderer.dll", 415128 },
-	{ "ros_2090/SocialClubHelper.exe", "0DCD077459CCE9B3831B4F0B5797502BB7C41D24", "https://content.cfx.re/mirrors/ros/2.0.9.0/SocialClubHelper.exe", 2768792 },
 	{ "ros_2090/SocialClubVulkanLayer.dll", "572E95099825B507079349A2B24BBAE4C1567B84", "https://content.cfx.re/mirrors/ros/2.0.9.0/SocialClubVulkanLayer.dll", 476056 },
 	{ "ros_2090/SocialClubVulkanLayer.json", "5DA071BDE81BF96C8939978343C6B5B93730CB39", "https://content.cfx.re/mirrors/ros/2.0.9.0/SocialClubVulkanLayer.json", 339 },
-	{ "ros_2090/v8_context_snapshot.bin", "AE3D50F4DB62DC62A37D4C222169BA7C57837E54", "https://content.cfx.re/mirrors/ros/2.0.9.0/v8_context_snapshot.bin", 171494 },
-	{ "ros_2090/locales/am.pak", "91B918C8D9C842535C006CAD51FEF1F7A4DF3DF4", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/am.pak", 397362 },
-	{ "ros_2090/locales/ar.pak", "B7CB43366C3AFC11EECA9E25B7577BB91FA84EE9", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ar.pak", 410699 },
-	{ "ros_2090/locales/bg.pak", "A29DEE681AAC5A851BCEC0EDC8F859AADD37E8EB", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/bg.pak", 449555 },
-	{ "ros_2090/locales/bn.pak", "A61F5CE476F65C9D9A8C0BFCEE73A4555568140B", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/bn.pak", 587356 },
-	{ "ros_2090/locales/ca.pak", "0EE3D65026BE39BE442967545DF4C1C95490040B", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ca.pak", 279277 },
-	{ "ros_2090/locales/cs.pak", "5F0781C07F41BF591B6AF843E0195510666CCB7A", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/cs.pak", 285641 },
-	{ "ros_2090/locales/da.pak", "35A30EF5AD3F9DD412D6A161E187A27B097E6DBD", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/da.pak", 256720 },
-	{ "ros_2090/locales/de.pak", "4B7C0AADBEA7408DC6B88722AC1C9E02CC94CB97", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/de.pak", 277815 },
-	{ "ros_2090/locales/el.pak", "82018633A3A2BFCFD4AFA8E74E4530BC57035748", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/el.pak", 495477 },
-	{ "ros_2090/locales/en-GB.pak", "D0EFD685C081A591AE86599B2688ECB7A5FF2C17", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/en-GB.pak", 228181 },
-	{ "ros_2090/locales/en-US.pak", "82212A642C90B51B8F67E517EE8782DA841B658F", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/en-US.pak", 230622 },
-	{ "ros_2090/locales/es-419.pak", "39D5477AAD201AB6D305FE1A466F9692646033A1", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/es-419.pak", 274527 },
-	{ "ros_2090/locales/es.pak", "2A0014E819249BC202B34A80D1C04496C83D924D", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/es.pak", 278599 },
-	{ "ros_2090/locales/et.pak", "225D5EEE935C42F2668686ED8C6CF9D81686ED65", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/et.pak", 248135 },
-	{ "ros_2090/locales/fa.pak", "D90C04E54C127A98B1F4E9E1061786162E5F6946", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/fa.pak", 398236 },
-	{ "ros_2090/locales/fi.pak", "81BB7DBD212FBC760162B96DA229B39516D1E25F", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/fi.pak", 256469 },
-	{ "ros_2090/locales/fil.pak", "70C132726600A4C640C627D36FB01D8FA2C499F4", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/fil.pak", 284303 },
-	{ "ros_2090/locales/fr.pak", "E22A9A3F57204407AD3EACAB0F320ABA92B79A5B", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/fr.pak", 301254 },
-	{ "ros_2090/locales/gu.pak", "EA5AF8CA67D502E1CB856B6ED02ECC0BF6AE525B", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/gu.pak", 561637 },
-	{ "ros_2090/locales/he.pak", "AE27C24DA778E08E773330111F76FCA5C583AD02", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/he.pak", 343790 },
-	{ "ros_2090/locales/hi.pak", "133DEA57961AB17F1FE4B7175236D02168C2DE8D", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/hi.pak", 579292 },
-	{ "ros_2090/locales/hr.pak", "86BBEAAEBF238F1A1A57FAC33FF6D8CBEB3E086E", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/hr.pak", 272869 },
-	{ "ros_2090/locales/hu.pak", "E7691035840804D7CC3C895855AF209860A6E246", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/hu.pak", 295085 },
-	{ "ros_2090/locales/id.pak", "8268CA0DEC094D655B38CC0A7595FC7404CA6F75", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/id.pak", 246389 },
-	{ "ros_2090/locales/it.pak", "6F0DB2FF20097E53C4CF83A97AEB30FD97CF38E8", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/it.pak", 269987 },
-	{ "ros_2090/locales/ja.pak", "AA3761667AE5FD0D0E69E81354F541E4C0CA9EA6", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ja.pak", 334646 },
-	{ "ros_2090/locales/kn.pak", "E4F6A5221EF853E4480C317BB8A0CA18E7311D05", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/kn.pak", 653458 },
-	{ "ros_2090/locales/ko.pak", "72840023C8DCA628D53917187ABA524AE06B3805", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ko.pak", 281693 },
-	{ "ros_2090/locales/lt.pak", "699BDD5995428B3B206342DC876EBE95739EE555", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/lt.pak", 293018 },
-	{ "ros_2090/locales/lv.pak", "D7A3568EB32B16EB43FDC27D875ACD2EE20B5D24", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/lv.pak", 291468 },
-	{ "ros_2090/locales/ml.pak", "AEC480C5F357D7AC74B4F2081B37E3BD97CDA481", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ml.pak", 689533 },
-	{ "ros_2090/locales/mr.pak", "CF9D8F5AAE61156092239C4D85C3352F0E055C56", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/mr.pak", 552349 },
-	{ "ros_2090/locales/ms.pak", "0B57D80FF583AA4921271EAAD4C0D71C6094A119", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ms.pak", 256222 },
-	{ "ros_2090/locales/nb.pak", "89CF4738188153DE01B6994B55E6F4754A1CA7B7", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/nb.pak", 251280 },
-	{ "ros_2090/locales/nl.pak", "3BED7D65FBB7141CED43B9A4E143190DA3C61CA4", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/nl.pak", 262046 },
-	{ "ros_2090/locales/pl.pak", "71BA95167ED6777EEA6863FD4555C550F56F57A4", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/pl.pak", 284801 },
-	{ "ros_2090/locales/pt-BR.pak", "F8144E74EF3F128E08730F5D4E926914D81E817E", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/pt-BR.pak", 271000 },
-	{ "ros_2090/locales/pt-PT.pak", "D2F9B4F5C5ADE7EB54838ACB4BDA5FA0E4BDF3C0", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/pt-PT.pak", 274231 },
-	{ "ros_2090/locales/ro.pak", "A9B321D3A1AC30E003BACA2E4FB5C984137B17BB", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ro.pak", 280931 },
-	{ "ros_2090/locales/ru.pak", "70C39DF950C6A0C2DB5396BB9BC8070ABF98AC03", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ru.pak", 448316 },
-	{ "ros_2090/locales/sk.pak", "CBD4990B3B6DC6F1F168A8D710980FBF19E49222", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/sk.pak", 289926 },
-	{ "ros_2090/locales/sl.pak", "F8BEF9D34DACFC34C5A8772570D31D27A19869D0", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/sl.pak", 276423 },
-	{ "ros_2090/locales/sr.pak", "F138A577C7D1D681D22E3C001FA4731C667F14B8", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/sr.pak", 426245 },
-	{ "ros_2090/locales/sv.pak", "9142C943F1A2DACD0726BB7487F4EC9EDC01F4CA", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/sv.pak", 253133 },
-	{ "ros_2090/locales/sw.pak", "8B3DB01EBFD19F8775F6ED114973350FF1814C0A", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/sw.pak", 259577 },
-	{ "ros_2090/locales/ta.pak", "18CD81ACF8D9CCAB5B281C9EB02E06D3091A164C", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/ta.pak", 661848 },
-	{ "ros_2090/locales/te.pak", "143A27F67341827F8B32458F3C18ECD604093657", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/te.pak", 620983 },
-	{ "ros_2090/locales/th.pak", "D78AA25633B015464855F60523FE85060959A939", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/th.pak", 526441 },
-	{ "ros_2090/locales/tr.pak", "AD7B39AC558124D7A5F73A83CA0E5E1CC4739425", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/tr.pak", 268763 },
-	{ "ros_2090/locales/uk.pak", "7264E679520E3981A2BF39D7C9EB0085C327A920", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/uk.pak", 448944 },
-	{ "ros_2090/locales/vi.pak", "51CADECB9BCD8FE22AFEAD0A5FC5CECB52C30CAD", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/vi.pak", 314139 },
-	{ "ros_2090/locales/zh-CN.pak", "72BECBAD361E228A8A164B01D1541CCBF7E28EAF", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/zh-CN.pak", 233298 },
-	{ "ros_2090/locales/zh-TW.pak", "DF8FFB51826D76F8E4E11FA8555E0FFB2282A3BE", "https://content.cfx.re/mirrors/ros/2.0.9.0/locales/zh-TW.pak", 233282 },
-	{ "ros_2090/swiftshader/libEGL.dll", "0D68E8B47FE02318526721E178F7EB8E83BBC719", "https://content.cfx.re/mirrors/ros/2.0.9.0/swiftshader/libEGL.dll", 419224 },
-	{ "ros_2090/swiftshader/libGLESv2.dll", "A60249BA16BD12C18B773D702D42B93A5CE598AE", "https://content.cfx.re/mirrors/ros/2.0.9.0/swiftshader/libGLESv2.dll", 2699672 },
+#endif
 
 	{ "launcher/LauncherPatcher.exe", "1C6BCE6CDB4B2E1766A67F931A72519CEFF6AEB1", "", "", 0, 0 },
 	{ "launcher/index.bin", "85e2cc75d6d07518883ce5d377d3425b74636667", "", "", 0, 0 },
@@ -484,10 +372,6 @@ static std::vector<GameCacheEntry> g_requiredEntries =
 	{ "ros_2079_x86/locales/zh-TW.pak", "7F67C3A955A99FD31C0A5D5D7B0CD6B404F09BB1", "https://content.cfx.re/mirrors/emergency_mirror/ros_2079_x86/locales/zh-TW.pak", 227384 },
 	{ "ros_2079_x86/swiftshader/libEGL.dll", "315BE829397C2C65B4401DE0A9F634D2DF864CD4", "https://content.cfx.re/mirrors/emergency_mirror/ros_2079_x86/swiftshader/libEGL.dll", 338312 },
 	{ "ros_2079_x86/swiftshader/libGLESv2.dll", "E62DA6B61D963AB9CD242C2811AC9D7ADA2613AB", "https://content.cfx.re/mirrors/emergency_mirror/ros_2079_x86/swiftshader/libGLESv2.dll", 3017608 },
-#endif
-
-#if defined(_M_IX86)
-	// #TODOLIBERTY: ROS 2.0.7.x for 32-bit
 #endif
 };
 
@@ -570,8 +454,6 @@ static std::vector<GameCacheStorageEntry> LoadCacheStorage()
 
 	HANDLE hFind = FindFirstFile(MakeRelativeCitPath(L"data\\game-storage\\*.*").c_str(), &findData);
 
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
-
 	if (hFind != INVALID_HANDLE_VALUE)
 	{
 		do 
@@ -580,7 +462,7 @@ static std::vector<GameCacheStorageEntry> LoadCacheStorage()
 			std::string fileName;
 			std::string fileHash;
 
-			if (ParseCacheFileName(converter.to_bytes(findData.cFileName).c_str(), fileName, fileHash))
+			if (ParseCacheFileName(ToNarrow(findData.cFileName).c_str(), fileName, fileHash))
 			{
 				// add the entry, if so
 				LARGE_INTEGER quadTime;
@@ -921,8 +803,6 @@ static bool PerformUpdate(const std::vector<GameCacheEntry>& entries)
 			}
 		}
 
-		std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
-
 		// if not, copy it from the local filesystem (we're abusing the download code here a lot)
 		if (!fileOutdated)
 		{
@@ -959,7 +839,7 @@ static bool PerformUpdate(const std::vector<GameCacheEntry>& entries)
 						curl_easy_cleanup(curl);
 					}
 
-					CL_QueueDownload(va("file:///%s", escapedUrl), converter.to_bytes(entry.GetCacheFileName()).c_str(), entry.localSize, false);
+					CL_QueueDownload(va("file:///%s", escapedUrl), ToNarrow(entry.GetCacheFileName()).c_str(), entry.localSize, compressionAlgo_e::None);
 
 					notificationEntries.push_back({ entry, true });
 				}
@@ -969,7 +849,7 @@ static bool PerformUpdate(const std::vector<GameCacheEntry>& entries)
 					{
 						if (outHash == deltaEntry.fromChecksum)
 						{
-							CL_QueueDownload(deltaEntry.remoteFile.c_str(), ToNarrow(deltaEntry.GetLocalFileName()).c_str(), deltaEntry.dlSize, false);
+							CL_QueueDownload(deltaEntry.remoteFile.c_str(), ToNarrow(deltaEntry.GetLocalFileName()).c_str(), deltaEntry.dlSize, compressionAlgo_e::None);
 
 							notificationEntries.push_back({ deltaEntry.MakeEntry(), false });
 							theseDeltas.emplace_back(deltaEntry, entry);
@@ -986,7 +866,7 @@ static bool PerformUpdate(const std::vector<GameCacheEntry>& entries)
 			if (referencedFiles.find(entry.remotePath) == referencedFiles.end())
 			{
 				// download it from the rockstar service
-				std::string localFileName = (entry.archivedFile) ? converter.to_bytes(entry.GetRemoteBaseName()) : converter.to_bytes(entry.GetCacheFileName());
+				std::string localFileName = (entry.archivedFile) ? ToNarrow(entry.GetRemoteBaseName()) : ToNarrow(entry.GetCacheFileName());
 				const char* remotePath = entry.remotePath;
 
 				if (_strnicmp(remotePath, "http", 4) != 0 && _strnicmp(remotePath, "ipfs", 4) != 0)
@@ -995,7 +875,7 @@ static bool PerformUpdate(const std::vector<GameCacheEntry>& entries)
 				}
 
 				// if the file isn't of the original size
-				CL_QueueDownload(remotePath, localFileName.c_str(), entry.remoteSize, (entry.remoteSize != entry.localSize && !entry.archivedFile));
+				CL_QueueDownload(remotePath, localFileName.c_str(), entry.remoteSize, ((entry.remoteSize != entry.localSize && !entry.archivedFile) ? compressionAlgo_e::XZ : compressionAlgo_e::None));
 
 				if (strncmp(remotePath, "ipfs://", 7) == 0)
 				{
@@ -1047,7 +927,7 @@ static bool PerformUpdate(const std::vector<GameCacheEntry>& entries)
 		StartIPFS();
 	}
 
-	UI_UpdateText(0, gettext(L"Updating game cache...").c_str());
+	UI_UpdateText(0, gettext(L"Updating game storage...").c_str());
 
 	bool retval = DL_RunLoop();
 
@@ -1399,27 +1279,113 @@ bool IsTargetGameBuildOrGreater()
 
 std::map<std::string, std::string> UpdateGameCache()
 {
+#if defined(_M_AMD64)
+	std::vector<GameCacheEntry> launcherEntries;
+
+	launcherEntries = {
+		{ "launcher/api-ms-win-core-console-l1-1-0.dll", "724F4F91041AD595E365B724A0348C83ACF12BBB", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-console-l1-1-0.dll", 19208 },
+		{ "launcher/api-ms-win-core-datetime-l1-1-0.dll", "4940D5B92B6B80A40371F8DF073BF3EB406F5658", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-datetime-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-debug-l1-1-0.dll", "E7C8A6C29C3158F8B332EEA5C33C3B1E044B5F73", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-debug-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-errorhandling-l1-1-0.dll", "51CBB7BA47802DC630C2507750432C55F5979C27", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-errorhandling-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-file-l1-1-0.dll", "9ACBEEF0AC510C179B319CA69CD5378D0E70504D", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-file-l1-1-0.dll", 22280 },
+		{ "launcher/api-ms-win-core-file-l1-2-0.dll", "04669214375B25E2DC8A3635484E6EEB206BC4EB", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-file-l1-2-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-file-l2-1-0.dll", "402B7B8F8DCFD321B1D12FC85A1EE5137A5569B2", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-file-l2-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-handle-l1-1-0.dll", "A2E2A40CEA25EA4FD64B8DEAF4FBE4A2DB94107A", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-handle-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-heap-l1-1-0.dll", "B4310929CCB82DD3C3A779CAB68F1F9F368076F2", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-heap-l1-1-0.dll", 19208 },
+		{ "launcher/api-ms-win-core-interlocked-l1-1-0.dll", "F779CDEF9DED19402AA72958085213D6671CA572", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-interlocked-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-libraryloader-l1-1-0.dll", "47143A66B4A2E2BA019BF1FD07BCCA9CFB8BB117", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-libraryloader-l1-1-0.dll", 19720 },
+		{ "launcher/api-ms-win-core-localization-l1-2-0.dll", "9874398548891F6A08FC06437996F84EB7495783", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-localization-l1-2-0.dll", 21256 },
+		{ "launcher/api-ms-win-core-memory-l1-1-0.dll", "9C03356CF48112563BB845479F40BF27B293E95E", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-memory-l1-1-0.dll", 19208 },
+		{ "launcher/api-ms-win-core-namedpipe-l1-1-0.dll", "CB59F1FE73C17446EB196FC0DD7D944A0CD9D81F", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-namedpipe-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-processenvironment-l1-1-0.dll", "2745259F4DBBEFBF6B570EE36D224ABDB18719BC", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-processenvironment-l1-1-0.dll", 19720 },
+		{ "launcher/api-ms-win-core-processthreads-l1-1-0.dll", "50699041060D14576ED7BACBD44BE9AF80EB902A", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-processthreads-l1-1-0.dll", 20744 },
+		{ "launcher/api-ms-win-core-processthreads-l1-1-1.dll", "0BFFB9ED366853E7019452644D26E8E8F236241B", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-processthreads-l1-1-1.dll", 19208 },
+		{ "launcher/api-ms-win-core-profile-l1-1-0.dll", "E7E0B18A40A35BD8B0766AC72253DE827432E148", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-profile-l1-1-0.dll", 18184 },
+		{ "launcher/api-ms-win-core-rtlsupport-l1-1-0.dll", "24F37D46DFC0EF303EF04ABF9956241AF55D25C9", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-rtlsupport-l1-1-0.dll", 19208 },
+		{ "launcher/api-ms-win-core-string-l1-1-0.dll", "637E4A9946691F76E6DEB69BDC21C210921D6F07", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-string-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-core-synch-l1-1-0.dll", "5584C189216A17228CCA6CD07037AAA9A8603241", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-synch-l1-1-0.dll", 20744 },
+		{ "launcher/api-ms-win-core-synch-l1-2-0.dll", "A9AEBBBB73B7B846B051325D7572F2398F5986EE", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-synch-l1-2-0.dll", 19208 },
+		{ "launcher/api-ms-win-core-sysinfo-l1-1-0.dll", "F20AE25484A1C1B43748A1F0C422F48F092AD2C1", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-sysinfo-l1-1-0.dll", 19720 },
+		{ "launcher/api-ms-win-core-timezone-l1-1-0.dll", "4BF13DB65943E708690D6256D7DDD421CC1CC72B", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-timezone-l1-1-0.dll", 19208 },
+		{ "launcher/api-ms-win-core-util-l1-1-0.dll", "1E1A5AB47E4C2B3C32C81690B94954B7612BB493", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-core-util-l1-1-0.dll", 18696 },
+		{ "launcher/api-ms-win-crt-conio-l1-1-0.dll", "49002B58CB0DF2EE8D868DEC335133CF225657DF", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-conio-l1-1-0.dll", 19720 },
+		{ "launcher/api-ms-win-crt-convert-l1-1-0.dll", "C84E41FDCC4CA89A76AE683CB390A9B86500D3CA", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-convert-l1-1-0.dll", 22792 },
+		{ "launcher/api-ms-win-crt-environment-l1-1-0.dll", "9A4818897251CACB7FE1C6FE1BE3E854985186AD", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-environment-l1-1-0.dll", 19208 },
+		{ "launcher/api-ms-win-crt-filesystem-l1-1-0.dll", "78FA03C89EA12FF93FA499C38673039CC2D55D40", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-filesystem-l1-1-0.dll", 20744 },
+		{ "launcher/api-ms-win-crt-heap-l1-1-0.dll", "60B4CF246C5F414FC1CD12F506C41A1043D473EE", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-heap-l1-1-0.dll", 19720 },
+		{ "launcher/api-ms-win-crt-locale-l1-1-0.dll", "9C1DF49A8DBDC8496AC6057F886F5C17B2C39E3E", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-locale-l1-1-0.dll", 19208 },
+		{ "launcher/api-ms-win-crt-math-l1-1-0.dll", "8B35EC4676BD96C2C4508DC5F98CA471B22DEED7", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-math-l1-1-0.dll", 27912 },
+		{ "launcher/api-ms-win-crt-multibyte-l1-1-0.dll", "91EEF52C557AEFD0FDE27E8DF4E3C3B7F99862F2", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-multibyte-l1-1-0.dll", 26888 },
+		{ "launcher/api-ms-win-crt-private-l1-1-0.dll", "0C33CFE40EDD278A692C2E73E941184FD24286D9", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-private-l1-1-0.dll", 71432 },
+		{ "launcher/api-ms-win-crt-process-l1-1-0.dll", "EC96F7BEEAEC14D3B6C437B97B4A18A365534B9B", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-process-l1-1-0.dll", 19720 },
+		{ "launcher/api-ms-win-crt-runtime-l1-1-0.dll", "A19ACEFA3F95D1B565650FDBC40EF98C793358E9", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-runtime-l1-1-0.dll", 23304 },
+		{ "launcher/api-ms-win-crt-stdio-l1-1-0.dll", "982B5DA1C1F5B9D74AF6243885BCBA605D54DF8C", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-stdio-l1-1-0.dll", 24840 },
+		{ "launcher/api-ms-win-crt-string-l1-1-0.dll", "7F389E6F2D6E5BEB2A3BAF622A0C0EA24BC4DE60", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-string-l1-1-0.dll", 24840 },
+		{ "launcher/api-ms-win-crt-time-l1-1-0.dll", "EE815A158BAACB357D9E074C0755B6F6C286B625", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-time-l1-1-0.dll", 21256 },
+		{ "launcher/api-ms-win-crt-utility-l1-1-0.dll", "EAA07829D012206AC55FB1AF5CC6A35F341D22BE", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/api-ms-win-crt-utility-l1-1-0.dll", 19208 },
+		{ "launcher/Launcher.exe", "F259DE45C50F399D3E278FD39401EF51A3CC031A", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/Launcher.exe", 48490288 },
+		{ "launcher/Launcher.rpf", "237682874D921209CDBDB16E257C65A9480BAD94", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/Launcher.rpf", 858112 },
+		{ "launcher/LauncherPatcher.exe", "BFD3A153979C2CED11F6F8BFDBE767AD502F4655", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/LauncherPatcher.exe", 508208 },
+		{ "launcher/mtl_libovr.dll", "0FF4CEDA9DE3B63C4DE6E1626009D5ED5A475C96", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/mtl_libovr.dll", 178584 },
+		{ "launcher/offline.pak", "53F93E488AA5482C187641CE85164F7C5A1ED8B2", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/offline.pak", 1597382 },
+		{ "launcher/RockstarService.exe", "FCA2A3393CEDB7DE49C6ABAD69F2ACC7354DFD66", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/RockstarService.exe", 2017072 },
+		{ "launcher/RockstarSteamHelper.exe", "8E10781C248612A0F00A2BBFA828FC110978E751", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/RockstarSteamHelper.exe", 1063216 },
+		{ "launcher/ucrtbase.dll", "4189F4459C54E69C6D3155A82524BDA7549A75A6", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/ucrtbase.dll", 1016584 },
+		{ "launcher/ThirdParty/Epic/EOSSDK-Win64-Shipping-1.13.1.dll", "9176F6D58E46153342D7B065D279636DF8298603", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/ThirdParty/Epic/EOSSDK-Win64-Shipping-1.13.1.dll", 23390688 },
+		{ "launcher/ThirdParty/Epic/EOSSDK-Win64-Shipping.dll", "AF01787DDB7DE00239EDC62D33E0B20C0BE80037", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/ThirdParty/Epic/EOSSDK-Win64-Shipping.dll", 9971968 },
+		{ "launcher/ThirdParty/Steam/steam_api64.dll", "BD014660F7978A07BA2F99B6CF0621D678602663", "https://content.cfx.re/mirrors/mtl/1.0.53.576/launcher/ThirdParty/Steam/steam_api64.dll", 121256 }, 
+	};
+
+	for (const auto& entry : launcherEntries)
+	{
+		g_requiredEntries.push_back(entry);
+	}
+#endif
+
 #if defined(COMPILING_GLUE)
 	g_requiredEntries.clear();
 #endif
 
-	// 1604/1868 toggle
+	// cross-build toggle
 #ifdef GTA_FIVE
 	if (Is372())
 	{
 		g_requiredEntries.push_back({ "GTA5.exe", "ae6e9cc116e8435e4dcfb5b870deee00a8b0904c", "https://runtime.fivem.net/patches/GTA_V_Patch_1_0_372_2.exe", "$/GTA5.exe", 55559560, 399999536 });
 		g_requiredEntries.push_back({ "update/update.rpf", "b72884c9af7170908f558ec5d629d805857b80f2", "https://runtime.fivem.net/patches/GTA_V_Patch_1_0_372_2.exe", "$/update/update.rpf", 352569344, 399999536 });
 	}
+	else if (IsTargetGameBuild<2612>())
+	{
+		g_requiredEntries.push_back({ "GTA5.exe", "d423086fd7a7721b8be77cfb9a4f8826784b284b", "https://content.cfx.re/mirrors/patches/2612.1/GTA5.exe", 60351952 });
+		g_requiredEntries.push_back({ "update/update.rpf", "80f9bd028e5bc781f641fe210a88579eff827989", "https://content.cfx.re/mirrors/patches/2612.1/update.rpf", 1056649216 });
+		g_requiredEntries.push_back({ "update/update2.rpf", "c993e2d14cce9462fa8ba056f3406d60050a1c92", "https://content.cfx.re/mirrors/patches/2612.1/update2.rpf", 312209408,
+		{
+			{ "e040bb68272c3518e411ada7fb43a2a45151b070", "c993e2d14cce9462fa8ba056f3406d60050a1c92", "https://content.cfx.re/mirrors/patches/2628_2612_update2.hdiff", 161966401 },
+		} });
+	}
+	else if (IsTargetGameBuild<2545>())
+	{
+		g_requiredEntries.push_back({ "GTA5.exe", "517556bb548880362c18d502361ce374070994c2", "https://content.cfx.re/mirrors/patches/2545.0/GTA5.exe", 59988376 });
+		g_requiredEntries.push_back({ "update/update.rpf", "2993b3c30f61cbbb8dbce859604d7fb717ff8dae", "https://content.cfx.re/mirrors/patches/2545.0/update.rpf", 1366638592,
+		{
+			{ "80f9bd028e5bc781f641fe210a88579eff827989", "2993b3c30f61cbbb8dbce859604d7fb717ff8dae", "https://content.cfx.re/mirrors/patches/2612_2545_update.hdiff", 311774185 },
+		} });
+	}
 	else if (IsTargetGameBuild<2372>())
 	{
 		g_requiredEntries.push_back({ "GTA5.exe", "470235e04299b02aa3aef834ef1ff834cac2327f", "https://content.cfx.re/mirrors/patches/2372.0/GTA5.exe", 59716912 });
-		g_requiredEntries.push_back({ "update/update.rpf", "1824cdbc27c3e0eaa86920a38751322727872831", "https://content.cfx.re/mirrors/patches/2372.0/update.rpf", 1132066816 });
+		g_requiredEntries.push_back({ "update/update.rpf", "1824cdbc27c3e0eaa86920a38751322727872831", "https://content.cfx.re/mirrors/patches/2372.0/update.rpf", 1132066816,
+		{
+			{ "80f9bd028e5bc781f641fe210a88579eff827989", "1824cdbc27c3e0eaa86920a38751322727872831", "https://content.cfx.re/mirrors/patches/2612_2372_update.hdiff", 343976392 },
+			{ "2993b3c30f61cbbb8dbce859604d7fb717ff8dae", "1824cdbc27c3e0eaa86920a38751322727872831", "https://content.cfx.re/mirrors/patches/2545_2372_update.hdiff", 276106385 },
+		} });
 	}
 	else if (IsTargetGameBuild<2189>())
 	{
 		g_requiredEntries.push_back({ "GTA5.exe", "fcd5fd8a9f99f2e08b0cab5d500740f28a75b75a", "https://content.cfx.re/mirrors/patches/2189.0/GTA5.exe", 63124096 });
 		g_requiredEntries.push_back({ "update/update.rpf", "fe387dbc0f700d690b53d44ce1226c624c24b8fc", "https://content.cfx.re/mirrors/patches/2189.0/update.rpf", 1276805120,
 		{
+			{ "80f9bd028e5bc781f641fe210a88579eff827989", "fe387dbc0f700d690b53d44ce1226c624c24b8fc", "https://content.cfx.re/mirrors/patches/2612_2189_update.hdiff", 508757790 },
+			{ "2993b3c30f61cbbb8dbce859604d7fb717ff8dae", "fe387dbc0f700d690b53d44ce1226c624c24b8fc", "https://content.cfx.re/mirrors/patches/2545_2189_update.hdiff", 441617306 },
 			{ "1824cdbc27c3e0eaa86920a38751322727872831", "fe387dbc0f700d690b53d44ce1226c624c24b8fc", "https://content.cfx.re/mirrors/patches/2372_2189_update.hdiff", 429153146 },
 			{ "748d16b81a34ad317b93cd85e2b088dabdce5cc7", "fe387dbc0f700d690b53d44ce1226c624c24b8fc", "https://content.cfx.re/mirrors/patches/2245_2189_update.hdiff", 193145914 },
 			{ "36c5c94274602527f946497553e118d72500c09f", "fe387dbc0f700d690b53d44ce1226c624c24b8fc", "https://content.cfx.re/mirrors/patches/2215_2189_update.hdiff", 21294688 },	
@@ -1430,6 +1396,8 @@ std::map<std::string, std::string> UpdateGameCache()
 		g_requiredEntries.push_back({ "GTA5.exe", "741c8b91ef57140c023d8d29e38aab599759de76", "https://content.cfx.re/mirrors/patches/2060.2/GTA5.exe", 60589184 });
 		g_requiredEntries.push_back({ "update/update.rpf", "736f1cb26e59167f302c22385463d231cce302d3", "https://content.cfx.re/mirrors/patches/2060.2/update.rpf", 1229002752,
 		{
+			{ "80f9bd028e5bc781f641fe210a88579eff827989", "736f1cb26e59167f302c22385463d231cce302d3", "https://content.cfx.re/mirrors/patches/2612_2060_update.hdiff", 504469096 },
+			{ "2993b3c30f61cbbb8dbce859604d7fb717ff8dae", "736f1cb26e59167f302c22385463d231cce302d3", "https://content.cfx.re/mirrors/patches/2545_2060_update.hdiff", 438194552 },
 			{ "1824cdbc27c3e0eaa86920a38751322727872831", "736f1cb26e59167f302c22385463d231cce302d3", "https://content.cfx.re/mirrors/patches/2372_2060_update.hdiff", 427205591 },
 			{ "748d16b81a34ad317b93cd85e2b088dabdce5cc7", "736f1cb26e59167f302c22385463d231cce302d3", "https://content.cfx.re/mirrors/patches/2245_2060_update.hdiff", 249407832 },
 			{ "36c5c94274602527f946497553e118d72500c09f", "736f1cb26e59167f302c22385463d231cce302d3", "https://content.cfx.re/mirrors/patches/2215_2060_update.hdiff", 249407861 },
@@ -1442,6 +1410,8 @@ std::map<std::string, std::string> UpdateGameCache()
 		g_requiredEntries.push_back({ "GTA5.exe", "8939c8c71aa98ad7ca6ac773fae1463763c420d8", "https://content.cfx.re/mirrors/patches/1604.0/GTA5.exe", 72484280 });
 		g_requiredEntries.push_back({ "update/update.rpf", "fc941d698834e30e40a06a40f6a35b1b18e1c50c", "https://runtime.fivem.net/patches/GTA_V_Patch_1_0_1604_0.exe", "$/update/update.rpf", 966805504, 1031302600,
 		{
+			{ "80f9bd028e5bc781f641fe210a88579eff827989", "fc941d698834e30e40a06a40f6a35b1b18e1c50c", "https://content.cfx.re/mirrors/patches/2612_1604_update.hdiff", 475094324 },
+			{ "2993b3c30f61cbbb8dbce859604d7fb717ff8dae", "fc941d698834e30e40a06a40f6a35b1b18e1c50c", "https://content.cfx.re/mirrors/patches/2545_1604_update.hdiff", 409505316 },
 			{ "1824cdbc27c3e0eaa86920a38751322727872831", "fc941d698834e30e40a06a40f6a35b1b18e1c50c", "https://content.cfx.re/mirrors/patches/2372_1604_update.hdiff", 400087270 },
 			{ "748d16b81a34ad317b93cd85e2b088dabdce5cc7", "fc941d698834e30e40a06a40f6a35b1b18e1c50c", "https://content.cfx.re/mirrors/patches/2245_1604_update.hdiff", 255586706 },
 			{ "36c5c94274602527f946497553e118d72500c09f", "fc941d698834e30e40a06a40f6a35b1b18e1c50c", "https://content.cfx.re/mirrors/patches/2215_1604_update.hdiff", 255586724 },
@@ -1467,16 +1437,27 @@ std::map<std::string, std::string> UpdateGameCache()
 	{
 		g_requiredEntries.push_back({ "update/x64/dlcpacks/mptuner/dlc.rpf", "7a7521b3396701f4fe8ae51347c6206c46306648", "nope:https://runtime.fivem.net/patches/dlcpacks/patchday4ng/dlc.rpfmpbiker/dlc.rpf", 3482869760 });
 	}
+
+	if (IsTargetGameBuildOrGreater<2545>())
+	{
+		g_requiredEntries.push_back({ "update/x64/dlcpacks/mpsecurity/dlc.rpf", "27c8100da2537472ad012df036a95da08188d54a", "nope:https://runtime.fivem.net/patches/dlcpacks/patchday4ng/dlc.rpfmpbiker/dlc.rpf", 1978963968 });
+		g_requiredEntries.push_back({ "update/x64/dlcpacks/mpsecurity/dlc1.rpf", "82f34009966d790a2987c70a2872a5658a71f198", "nope:https://runtime.fivem.net/patches/dlcpacks/patchday4ng/dlc.rpfmpbiker/dlc.rpf", 1308874752 });
+	}
+
+	if (IsTargetGameBuildOrGreater<2612>())
+	{
+		g_requiredEntries.push_back({ "update/x64/dlcpacks/mpg9ec/dlc.rpf", "011114b746a4d5a830241a174b3e16eb2f63f224", "nope:https://runtime.fivem.net/patches/dlcpacks/patchday4ng/dlc.rpfmpbiker/dlc.rpf", 1847296 });
+	}
 #elif IS_RDR3
 	// 1311/1355/1436 toggle
 	if (IsTargetGameBuild<1436>())
 	{
-		g_requiredEntries.push_back({ "RDR2.exe", "3c7a863dd71ee4dc66b3ee2f031616c53ceb5090", "ipfs://bafybeigsscjuvgk7bz4hryhxrphzmchrrg4trsise2bbvq3utqdryqyddy", 89830808 });
-		g_requiredEntries.push_back({ "appdata0_update.rpf", "9d1d6bbe5aa65adf030ec38c5ab9ecc082840207", "ipfs://bafybeifjzvqpiybxsqvukwa6upnddkgoccsl5okg3hgvw3yyzxz7vca7f4", 3164575 });
-		g_requiredEntries.push_back({ "shaders_x64.rpf", "f4f06c18701d66958eb6f0ac243c8467033b864b", "ipfs://bafybeihfgavfbsihf65dtv6vyipphbcfrrytcj53hulzkoy7nonpwh4h74", 233898030 });
-		g_requiredEntries.push_back({ "update_1.rpf", "0853366e69b29daf01c05d643557e75d610933e7", "ipfs://bafybeihk27hp3wz3ud4pzlyobloievuk3xrntxhl26exec3pgrhlplnmly", 2836982634 });
+		g_requiredEntries.push_back({ "RDR2.exe", "5c474d04c0d8e8f0573be31ec015da2d54e27ff9", "ipfs://bafybeignxmbrmkhzkpvupziem6qpm33lm27xku6ag4pmzsafyo2fcksgg4", 89849752 });
+		g_requiredEntries.push_back({ "appdata0_update.rpf", "a3721e37521597daec336ee7872e45fb9b286bab", "ipfs://bafybeie2ge4mwttdhaneydf2ylsn3tp2bfwmon3rd34j5lo4zjepbfpub4", 3164575 });
+		g_requiredEntries.push_back({ "shaders_x64.rpf", "d5c4b9b845165a473da344d2b29ac5546b3f2b50", "ipfs://bafybeialsn5kxkokbfdz6odouazfntw6y3abvf2qylge3gwlhtortsuvlm", 233898030 });
+		g_requiredEntries.push_back({ "update_1.rpf", "77a30e21b549048a6186f337a6cd6ad6699d460d", "ipfs://bafybeid36os6iw26laqzau3lfe23zfkk42dzsy4o65jln2yneetvrxmcsu", 2836982634 });
 		g_requiredEntries.push_back({ "update_2.rpf", "3550ce534b2997306ae1bc13fc3abeec4573389f", "ipfs://bafybeiaum2y7k6gzsde2xwlstdidcp5vyb6vyqgl5djkwjpb4uesvz2fde", 152008462 });
-		g_requiredEntries.push_back({ "update_3.rpf", "5f2f26d9eb31f51a21a15f6466814c289906ca35", "ipfs://bafybeic6gss2v42cuc2xol23lc6s36rgoqnmeuuzf72z4wuxdwda4svvf4", 132374108 });
+		g_requiredEntries.push_back({ "update_3.rpf", "a2d3a0e6908b2834b6fd204e6de89e63788d927a", "ipfs://bafybeibhenxfkjsie7knqxrlk6bflhh57qbf7lrs7wr5f47kiavcfnt7mq", 132374108 });
 		g_requiredEntries.push_back({ "update_4.rpf", "39ca2bbb7a0ab8d8e09288ca8783b91654c9b91b", "ipfs://bafybeiefr5ayhajox2zcfwrkjvhoqt7c4ebcfiaxr3grjtrtvefd4en3fy", 2014659811 });
 	}
 	else if (IsTargetGameBuild<1355>())
@@ -1577,7 +1558,6 @@ std::map<std::string, std::string> UpdateGameCache()
 
 	// get a list of cache files that should be mapped given an updated cache
 	std::map<std::string, std::string> retval;
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
 
 	for (auto& entry : g_requiredEntries)
 	{
@@ -1595,7 +1575,7 @@ std::map<std::string, std::string> UpdateGameCache()
 
 		if (GetFileAttributes(entry.GetCacheFileName().c_str()) != INVALID_FILE_ATTRIBUTES)
 		{
-			retval.insert({ origFileName, converter.to_bytes(entry.GetCacheFileName()) });
+			retval.insert({ origFileName, ToNarrow(entry.GetCacheFileName()) });
 		}
 	}
 

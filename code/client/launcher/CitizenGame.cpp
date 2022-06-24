@@ -163,7 +163,7 @@ static void InitialGameHook()
 	hook::call(hook::get_pattern("8B F8 48 85 C0 74 47 48 8B C8 E8 ? ? ? ? 4C", -6), DeleteVideo);
 	
 	// draw loading screen even if 'not' enabled
-	hook::nop(hook::get_pattern("0F 29 74 24 30 85 DB", 7), 6);
+	hook::nop(hook::get_pattern("85 DB 0F 84 ? ? ? ? 8B 05 ? ? ? ? A8 01 75 15 83", 2), 6);
 }
 #elif defined(IS_RDR3)
 static void* g_f;
@@ -339,33 +339,6 @@ void AAD_Initialize()
 
 	// set GlobalFlags
 	*(DWORD*)((char*)peb + 0xBC) &= ~0x70;
-
-	if (CoreIsDebuggerPresent())
-	{
-		/*HANDLE hdl;
-		DWORD len = 0;
-		NtQueryInformationProcess(GetCurrentProcess(), (PROCESSINFOCLASS)0x1E, &hdl, sizeof(hdl), &len);
-
-		PSECURITY_DESCRIPTOR sd;
-		ULONG cb;
-
-		ConvertStringSecurityDescriptorToSecurityDescriptor(TEXT("D:(A;;0;;;OW)"),
-			SDDL_REVISION_1, &sd, &cb);
-
-		SetKernelObjectSecurity(hdl, DACL_SECURITY_INFORMATION, sd);
-
-		LocalFree(sd);
-
-		// NOP OutputDebugStringA; the debugger doesn't like multiple async exceptions
-		uint8_t* func = (uint8_t*)OutputDebugStringA;
-
-		DWORD oldProtect;
-		VirtualProtect(func, 1, PAGE_EXECUTE_READWRITE, &oldProtect);
-
-		//*func = 0xC3;
-
-		VirtualProtect(func, 1, oldProtect, &oldProtect);*/
-	}
 #elif defined(GTA_NY)
 	// set BeingDebugged
 	PPEB peb = (PPEB)__readfsdword(0x30);

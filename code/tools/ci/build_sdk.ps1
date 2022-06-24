@@ -19,7 +19,10 @@ function End-Section
 $ErrorActionPreference = "Stop"
 $SaveDir = "C:\f\save"
 
-$FXCodeSubmoduleName = "ext/sdk/resources/sdk-root/fxcode"
+$WorkDir = $env:CI_PROJECT_DIR -replace '/','\'
+$WorkRootDir = "$WorkDir\code"
+
+$FXCodeSubmodulePath = "$WorkDir\ext\sdk\resources\sdk-root\fxcode"
 $LastFXCodeCommitPath = "$SaveDir\.fxcodecommit"
 $LastFXCodeCommit = ""
 
@@ -28,9 +31,6 @@ if (Test-Path $LastFXCodeCommitPath) {
 }
 
 $ShouldBuildFXCode = $false
-
-$WorkDir = $env:CI_PROJECT_DIR -replace '/','\'
-$WorkRootDir = "$WorkDir\code"
 
 Push-Location $WorkDir
 $SDKCommit = (git rev-list -1 HEAD ext/sdk-build/ ext/sdk/ code/tools/ci/build_sdk.ps1)
@@ -47,13 +47,6 @@ Push-Location $WorkDir
 $SubModules = git submodule | ForEach-Object { New-Object PSObject -Property @{ Hash = $_.Substring(1).Split(' ')[0]; Name = $_.Substring(1).Split(' ')[1] } }
 
 foreach ($submodule in $SubModules) {
-    if ($submodule.Name -eq $FXCodeSubmoduleName) {
-        if ($submodule.Hash -ne $LastFXCodeCommit) {
-            $ShouldBuildFXCode = $true
-            $submodule.Hash | Out-File -Encoding ascii -NoNewline $LastFXCodeCommitPath
-        }
-    }
-
     $SubmodulePath = git config -f .gitmodules --get "submodule.$($submodule.Name).path"
 
     if ((Test-Path $SubmodulePath) -and (Get-ChildItem $SubmodulePath).Length -gt 0) {
@@ -83,12 +76,22 @@ Pop-Location
 
 End-Section "update_submodules"
 
-Start-Section "sdk_build" "Building SDK"
+# Check if FXCode needs building
+Push-Location $FXCodeSubmodulePath
+$FXCodeSubmoduleCommit = git rev-parse HEAD
+
+if ($FXCodeSubmoduleCommit -ne $LastFXCodeCommit) {
+    $LastFXCodeCommit = $FXCodeSubmoduleCommit
+    $ShouldBuildFXCode = $true
+    $LastFXCodeCommit | Out-File -Encoding ascii -NoNewline $LastFXCodeCommitPath
+}
+Pop-Location
+
 # start building SDK
 # copied from run_postbuild.ps1
 Push-Location $WorkDir\ext\sdk-build
 if (!(Test-Path sdk-root\.commit) -or $SDKCommit -ne (Get-Content sdk-root\.commit)) {
-    .\build.cmd --build-fxcode=$ShouldBuildFXCode
+    .\build.cmd --build-fxcode=$ShouldBuildFXCode --fxcode-commit=$LastFXCodeCommit
     if (!$?) {
         throw "Build failed!";
     }
@@ -96,7 +99,6 @@ if (!(Test-Path sdk-root\.commit) -or $SDKCommit -ne (Get-Content sdk-root\.comm
     $SDKCommit | Out-File -Encoding ascii -NoNewline sdk-root\.commit
 }
 Pop-Location
-End-Section "sdk_build"
 
 # create save directory
 New-Item -ItemType Directory -Force $SaveDir | Out-Null

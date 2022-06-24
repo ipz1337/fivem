@@ -38,6 +38,8 @@
 #include <queue>
 #include <sstream>
 
+static bool fallbackPoll = true;
+
 static std::string_view GetBaseName(std::string_view str)
 {
 	return str.substr(str.find_last_of('/') + 1);
@@ -90,6 +92,8 @@ static CURL* curl_easy_init_cfx()
 #include <lzma.h>
 #undef restrict
 
+#include <zstd.h>
+
 typedef struct download_s
 {
 	std::string opath;
@@ -100,7 +104,7 @@ typedef struct download_s
 	int64_t size;
 	CURL* curlHandles[10];
 	FILE* fp[10];
-	bool compressed;
+	compressionAlgo_e algorithm;
 	bool conditionalDL;
 	bool doneExternal;
 	bool successExternal;
@@ -114,6 +118,10 @@ typedef struct download_s
 
 	lzma_stream strm;
 	uint8_t strmOut[65535];
+
+	ZSTD_DStream* zstrm;
+	ZSTD_inBuffer zin;
+	ZSTD_outBuffer zout;
 
 	int64_t progress = 0;
 	int numRetries = 10;
@@ -165,20 +173,21 @@ void CL_InitDownloadQueue()
 	dls.error = false;
 	
 	dls.downloadQueue = {};
+	dls.currentDownloads = {};
 }
 
-void CL_QueueDownload(const char* url, const char* file, int64_t size, bool compressed)
+void CL_QueueDownload(const char* url, const char* file, int64_t size, compressionAlgo_e algo)
 {
-	CL_QueueDownload(url, file, size, compressed, 1);
+	CL_QueueDownload(url, file, size, algo, 1);
 }
 
-void CL_QueueDownload(const char* url, const char* file, int64_t size, bool compressed, int segments)
+void CL_QueueDownload(const char* url, const char* file, int64_t size, compressionAlgo_e algo, int segments)
 {
 	if (strcmp(url, "https://runtime.fivem.net/patches/GTA_V_Patch_1_0_1604_0.exe") == 0)
 	{
 		for (int i = 0; i <= 9; i++)
 		{
-			CL_QueueDownload(va("https://content.cfx.re/mirrors/emergency_mirror/GTAV1604.exe%02d", i), va("%s.%d", file, i), i == 9 ? 87584200 : 104857600, false, 1);
+			CL_QueueDownload(va("https://content.cfx.re/mirrors/emergency_mirror/GTAV1604.exe%02d", i), va("%s.%d", file, i), i == 9 ? 87584200 : 104857600, compressionAlgo_e::None, 1);
 		}
 
 		return;
@@ -190,7 +199,7 @@ void CL_QueueDownload(const char* url, const char* file, int64_t size, bool comp
 	sprintf_s(download.url, sizeof(download.url), "%s", url);
 	strcpy_s(download.file, sizeof(download.file), file);
 	download.size = size;
-	download.compressed = compressed;
+	download.algorithm = algo;
 	download.segments = segments;
 
 	for (int i = 0; i < segments; i++)
@@ -219,6 +228,14 @@ void DL_Initialize()
 
 void DL_Shutdown()
 {
+	for (const auto& download : dls.currentDownloads)
+	{
+		if (download->fp[0])
+		{
+			fclose(download->fp[0]);
+		}
+	}
+
 	curl_multi_cleanup(dls.curl);
 	dls.downloadInitialized = false;
 }
@@ -258,9 +275,25 @@ void DL_DequeueDownload()
 	dls.downloadQueue.pop();
 }
 
-void DL_UpdateGlobalProgress(size_t thisSize)
+static std::mutex g_globalProgressMutex;
+
+void DL_UpdateGlobalProgress(size_t thisSize, uint64_t now = 0)
 {
+	std::unique_lock _(g_globalProgressMutex);
+
+	if (!now)
+	{
+		now = GetTickCount64();
+	}
+
 	dls.doneTotalBytes += thisSize;
+
+	if ((now - dls.lastTime) > 1000)
+	{
+		dls.bytesPerSecond = (int)(dls.completedSize - dls.lastBytes);
+		dls.lastTime = now;
+		dls.lastBytes = dls.completedSize;
+	}
 
 	double percentage = ((double)(dls.doneTotalBytes / 1000) / (dls.totalBytes / 1000)) * 100.0;
 
@@ -273,7 +306,7 @@ size_t DL_WriteToFile(void *ptr, size_t size, size_t nmemb, download_t* download
 {
 	size_t written = 0;
 
-	if (!download->compressed)
+	if (download->algorithm == compressionAlgo_e::None)
 	{
 		if (download->writeToMemory)
 		{
@@ -286,7 +319,7 @@ size_t DL_WriteToFile(void *ptr, size_t size, size_t nmemb, download_t* download
 			written = fwrite(ptr, size, nmemb, download->fp[0]);
 		}
 	}
-	else
+	else if (download->algorithm == compressionAlgo_e::XZ)
 	{
 		download->strm.next_in = (uint8_t*)ptr;
 		download->strm.avail_in = size * nmemb;
@@ -316,22 +349,43 @@ size_t DL_WriteToFile(void *ptr, size_t size, size_t nmemb, download_t* download
 
 		written = nmemb;
 	}
+	else if (download->algorithm == compressionAlgo_e::Zstd)
+	{
+		download->zin = { (uint8_t*)ptr, size * nmemb, 0 };
+
+		while (download->zin.pos < download->zin.size)
+		{
+			download->zout = { download->strmOut, sizeof(download->strmOut), 0 };
+
+			size_t ret = ZSTD_decompressStream(download->zstrm, &download->zout, &download->zin);
+
+			if (ZSTD_isError(ret))
+			{
+				UI_DisplayError(va(L"ZSTD decoding error %i (%s) in %s.", ret, ToWide(ZSTD_getErrorName(ret)), ToWide(download->file)));
+				return 0;
+			}
+
+			if (download->writeToMemory)
+			{
+				download->memoryStream << std::string(reinterpret_cast<char*>(download->strmOut), download->zout.pos);
+			}
+			else
+			{
+				fwrite(download->strmOut, 1, download->zout.pos, download->fp[0]);
+			}
+		}
+
+		written = nmemb;
+	}
 
 	// do size calculations
 	auto now = GetTickCount64();
-
 	download->progress += (size * nmemb);
 	dls.completedSize += (size * nmemb);
-	if ((now - dls.lastTime) > 1000)
-	{
-		dls.bytesPerSecond = (int)(dls.completedSize - dls.lastBytes);
-		dls.lastTime = now;
-		dls.lastBytes = dls.completedSize;
-	}
 
 	if ((now - dls.lastPoll) > 50)
 	{
-		DL_UpdateGlobalProgress(size * nmemb);
+		DL_UpdateGlobalProgress(size * nmemb, now);
 
 		dls.lastPoll = now;
 	}
@@ -380,6 +434,8 @@ public:
 	IpfsLibrary()
 		: success(false)
 	{
+		self = this;
+
 		assert(LoadLibrary(MakeRelativeCitPath(L"CoreRT.dll").c_str()));
 		hMod = LoadLibrary(MakeRelativeCitPath(L"ipfsdl.dll").c_str());
 
@@ -392,7 +448,8 @@ public:
 
 			if (ipfsdlInit)
 			{
-				success = ipfsdlInit();
+				ipfsdlInit(&OnInitStatic);
+				success = true;
 			}
 		}
 	}
@@ -402,6 +459,33 @@ public:
 		ipfsdlExit();
 	}
 
+private:
+	static inline IpfsLibrary* self;
+
+	static void OnInitStatic(bool succeeded)
+	{
+		self->OnInit(succeeded);
+	}
+
+	void OnInit(bool succeeded)
+	{
+		if (!succeeded)
+		{
+			success = false;
+		}
+
+		std::unique_lock _(m_initCbMutex);
+
+		if (m_initCb)
+		{
+			m_initCb();
+			m_initCb = {};
+		}
+
+		m_inited = true;
+	}
+
+public:
 	bool DownloadFile(const char* url, const std::function<bool(const void*, size_t)>& cb, const std::function<void(const char*)>& done)
 	{
 		struct Cxt
@@ -437,6 +521,23 @@ public:
 		return ipfsdlPoll();
 	}
 
+	auto EnsureInit(const std::function<bool()>& func)
+	{
+		if (m_inited)
+		{
+			return func();
+		}
+		else
+		{
+			UI_UpdateText(1, gettext(L"Initializing download library...").c_str());
+
+			std::unique_lock _(m_initCbMutex);
+			m_initCb = func;
+
+			return true;
+		}
+	}
+
 	operator bool()
 	{
 		return hMod && ipfsdlInit && ipfsdlExit && ipfsdlDownloadFile && ipfsdlPoll && success;
@@ -447,12 +548,16 @@ private:
 	using FinishCb = void(*)(void* cxt, const char* error);
 
 	HMODULE hMod;
-	bool(*ipfsdlInit)();
-	bool(*ipfsdlExit)();
-	void(*ipfsdlPoll)();
-	bool(*ipfsdlDownloadFile)(void* cxt, const char* url, DownloadCb cb, FinishCb done);
+	void(*ipfsdlInit)(void(*)(bool)) = nullptr;
+	bool(*ipfsdlExit)() = nullptr;
+	void(*ipfsdlPoll)() = nullptr;
+	bool(*ipfsdlDownloadFile)(void* cxt, const char* url, DownloadCb cb, FinishCb done) = nullptr;
 
 	bool success;
+
+	bool m_inited = false;
+	std::function<void()> m_initCb;
+	std::mutex m_initCbMutex;
 };
 
 static IpfsLibrary* GetIpfsLib()
@@ -461,6 +566,8 @@ static IpfsLibrary* GetIpfsLib()
 
 	return &ipfsLib;
 }
+
+extern void UI_SetSnailState(bool snail);
 
 static bool StartIPFSDownload(download_t* download)
 {
@@ -474,30 +581,45 @@ static bool StartIPFSDownload(download_t* download)
 	download->doneExternal = false;
 	download->successExternal = false;
 
-	UI_UpdateText(1, gettext(L"Starting IPFS discovery...").c_str());
+	UI_SetSnailState(true);
 
-	return ipfsLib.DownloadFile(download->url, [download](const void* data, size_t size)
+	fallbackPoll = false;
+
+	auto continueDownload = [download, &ipfsLib]()
 	{
-		if (DL_WriteToFile(const_cast<void*>(data), 1, size, download) != size)
-		{
-			return false;
-		}
+		UI_UpdateText(1, gettext(L"Starting IPFS discovery...").c_str());
 
-		return true;
-	}, [download](const char* error)
-	{
-		download->doneExternal = true;
+		return ipfsLib.DownloadFile(
+		download->url, [download](const void* data, size_t size)
+		{
+			fallbackPoll = true;
 
-		if (!error)
+			if (DL_WriteToFile(const_cast<void*>(data), 1, size, download) != size)
+			{
+				return false;
+			}
+
+			return true;
+		},
+		[download](const char* error)
 		{
-			download->successExternal = true;
-		}
-		else
-		{
-			strncpy(download->curlError, error, std::size(download->curlError));
-			download->curlError[std::size(download->curlError) - 1] = '\0';
-		}
-	});
+			download->doneExternal = true;
+
+			if (!error)
+			{
+				download->successExternal = true;
+			}
+			else
+			{
+				strncpy(download->curlError, error, std::size(download->curlError));
+				download->curlError[std::size(download->curlError) - 1] = '\0';
+			}
+
+			UI_SetSnailState(false);
+		});
+	};
+
+	return ipfsLib.EnsureInit(continueDownload);
 }
 
 static bool PollIPFS()
@@ -668,9 +790,17 @@ bool DL_ProcessDownload()
 
 		if (download->progress == 0)
 		{
-			lzma_stream_decoder(&download->strm, UINT64_MAX, 0);
-			download->strm.avail_out = sizeof(download->strmOut);
-			download->strm.next_out = download->strmOut;
+			if (download->algorithm == compressionAlgo_e::XZ)
+			{
+				lzma_stream_decoder(&download->strm, UINT64_MAX, 0);
+				download->strm.avail_out = sizeof(download->strmOut);
+				download->strm.next_out = download->strmOut;
+			}
+			else if (download->algorithm == compressionAlgo_e::Zstd)
+			{
+				download->zstrm = ZSTD_createDStream();
+				download->zout = { download->strmOut, sizeof(download->strmOut), 0 };
+			}
 		}
 
 		curl_multi_add_handle(dls.curl, curlHandle);
@@ -696,7 +826,7 @@ bool DL_ProcessDownload()
 					// let's try asking the shell
 					if (!ReallyMoveFile(opathWide, toDeleteName))
 					{
-						UI_DisplayError(va(L"Moving of %s failed (err = %d) and the shell didn't help fix this", ToWide(download->url), GetLastError()));
+						UI_DisplayError(va(L"Moving of %s failed (err = %d). Check your system for any conflicting software.", ToWide(download->file), GetLastError()));
 						return false;
 					}
 				}
@@ -705,7 +835,7 @@ bool DL_ProcessDownload()
 
 		if (MoveFile(tmpPathWide.c_str(), opathWide.c_str()) == 0)
 		{
-			UI_DisplayError(va(L"Moving of %s failed (err = %d) - make sure you don't have any existing FiveM processes running", ToWide(download->url), GetLastError()));
+			UI_DisplayError(va(L"Moving of %s failed (err = %d) - make sure you don't have any existing FiveM processes running", ToWide(download->file), GetLastError()));
 			DeleteFile(tmpPathWide.c_str());
 
 			return false;
@@ -770,8 +900,6 @@ bool DL_ProcessDownload()
 		return true;
 	};
 
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
-
 	// create new handles if we don't have one yet
 	for (auto& download : dls.currentDownloads)
 	{
@@ -821,7 +949,7 @@ bool DL_ProcessDownload()
 
 				bool allOK = true;
 
-				std::wstring tmpPathWide = converter.from_bytes(download->tmpPath);
+				std::wstring tmpPathWide = ToWide(download->tmpPath);
 
 				if (!download->writeToMemory)
 				{
@@ -873,7 +1001,14 @@ bool DL_ProcessDownload()
 
 				if (code == CURLE_OK)
 				{
-					lzma_end(&download->strm);
+					if (download->algorithm == compressionAlgo_e::XZ)
+					{
+						lzma_end(&download->strm);
+					}
+					else if (download->algorithm == compressionAlgo_e::Zstd)
+					{
+						ZSTD_freeDStream(download->zstrm);
+					}
 
 					if (!onSuccess(it))
 					{
@@ -934,6 +1069,18 @@ bool DL_Process()
 	if (!dls.downloadInitialized)
 	{
 		DL_Initialize();
+	}
+
+	if (fallbackPoll)
+	{
+		uint64_t now = GetTickCount64();
+
+		if ((now - dls.lastPoll) > 250)
+		{
+			DL_UpdateGlobalProgress(0, now);
+
+			dls.lastPoll = now;
+		}
 	}
 
 	if (!dls.currentDownloads.empty())
@@ -1092,6 +1239,7 @@ bool DL_RunLoop()
 
 		if (UI_IsCanceled())
 		{
+			DL_Shutdown();
 			return false;
 		}
 	}

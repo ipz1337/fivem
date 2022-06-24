@@ -43,10 +43,12 @@ rage::netObject* g_curNetObject;
 static std::set<uint16_t> g_dontParrotDeletionAcks;
 
 #ifdef GTA_FIVE
-static constexpr int g_netObjectTypeBitLength = 4;
+static constexpr int kNetObjectTypeBitLength = 4;
 #elif IS_RDR3
-static constexpr int g_netObjectTypeBitLength = 5;
+static constexpr int kNetObjectTypeBitLength = 5;
 #endif
+
+static constexpr int kSyncPacketMaxLength = 2400;
 
 void ObjectIds_AddObjectId(int objectId);
 void ObjectIds_StealObjectId(int objectId);
@@ -83,8 +85,6 @@ std::string GetType(void* d);
 CNetGamePlayer* GetLocalPlayer();
 
 CNetGamePlayer* GetPlayerByNetId(uint16_t);
-
-void UpdateTime(uint64_t serverTime, bool isInit = false);
 
 bool IsWaitingForTimeSync();
 
@@ -137,7 +137,7 @@ public:
 
 	virtual void DestroyNetworkObject(rage::netObject* object) override;
 
-	virtual void ChangeOwner(rage::netObject* object, CNetGamePlayer* player, int migrationType) override;
+	virtual void ChangeOwner(rage::netObject* object, int oldOwnerId, CNetGamePlayer* player, int migrationType) override;
 
 	virtual rage::netObject* GetNetworkObject(uint16_t id) override;
 
@@ -534,7 +534,7 @@ void CloneManagerLocal::ProcessSyncAck(uint16_t objId, uint16_t uniqifier)
 			auto syncTree = netObj->GetSyncTree();
 			syncTree->AckCfx(netObj, m_ackTimestamp);
 
-			if (netObj->m_20())
+			if (netObj->GetSyncData())
 			{
 				_processAck(syncTree, netObj, 31, 0 /* seq? */, m_ackTimestamp, 0xFFFFFFFF);
 			}
@@ -910,7 +910,7 @@ void msgClone::Read(int syncType, rl::MessageBuffer& buffer)
 
 	if (syncType == 1)
 	{
-		m_entityType = (NetObjEntityType)buffer.Read<uint8_t>(g_netObjectTypeBitLength);
+		m_entityType = (NetObjEntityType)buffer.Read<uint8_t>(kNetObjectTypeBitLength);
 		m_creationToken = 0;
 
 		if (icgi->NetProtoVersion >= 0x202002271209)
@@ -1229,13 +1229,13 @@ bool CloneManagerLocal::HandleCloneCreate(const msgClone& msg)
 	{
 		obj->GetBlender()->SetTimestamp(msg.GetTimestamp());
 
-		obj->m_1D0();
+		obj->PostSync();
 
 		obj->GetBlender()->ApplyBlend();
 		obj->GetBlender()->m_38();
 	}
 
-	obj->m_1C0();
+	obj->PostCreate();
 
 	// for the last time, ensure it's not local
 	if (obj->syncData.isRemote != isRemote || obj->syncData.ownerId != owner)
@@ -1421,7 +1421,7 @@ AckResult CloneManagerLocal::HandleCloneUpdate(const msgClone& msg)
 		syncTree->ApplyToObject(obj, nullptr);
 
 		// call post-apply
-		obj->m_1D0();
+		obj->PostSync();
 	}
 
 	// update client id if changed
@@ -2177,15 +2177,15 @@ void CloneManagerLocal::DestroyNetworkObject(rage::netObject* object)
 	m_savedEntityVec.erase(std::remove(m_savedEntityVec.begin(), m_savedEntityVec.end(), object), m_savedEntityVec.end());
 }
 
-void CloneManagerLocal::ChangeOwner(rage::netObject* object, CNetGamePlayer* player, int migrationType)
+void CloneManagerLocal::ChangeOwner(rage::netObject* object, int oldOwnerId, CNetGamePlayer* player, int migrationType)
 {
-	if (object->syncData.ownerId != player->physicalPlayerIndex())
+	if (oldOwnerId != player->physicalPlayerIndex())
 	{
 		GiveObjectToClient(object, g_netIdsByPlayer[player]);
 	}
 
 	m_netObjects[31].erase(object->GetObjectId());
-	m_netObjects[object->syncData.ownerId].erase(object->GetObjectId());
+	m_netObjects[oldOwnerId].erase(object->GetObjectId());
 	m_netObjects[player->physicalPlayerIndex()][object->GetObjectId()] = object;
 }
 
@@ -2338,7 +2338,7 @@ void CloneManagerLocal::WriteUpdates()
 #endif
 
 		// allocate a RAGE buffer
-		uint8_t packetStub[1200] = { 0 };
+		uint8_t packetStub[kSyncPacketMaxLength] = { 0 };
 		rage::datBitBuffer rlBuffer(packetStub, sizeof(packetStub));
 
 		// if we want to delete this object
@@ -2371,12 +2371,12 @@ void CloneManagerLocal::WriteUpdates()
 		}
 
 		// if this object doesn't have a game object, but it should, ignore it
-#ifdef GTA_FIVE
-		if (object->GetObjectType() != (uint16_t)NetObjEntityType::PickupPlacement)
-#elif IS_RDR3
 		if (object->GetObjectType() != (uint16_t)NetObjEntityType::PickupPlacement &&
-			object->GetObjectType() != (uint16_t)NetObjEntityType::PropSet)
+			object->GetObjectType() != (uint16_t)NetObjEntityType::Object // CNetObjObject *may* be a dummy object that's not converted to a world object yet
+#ifdef IS_RDR3
+			&& object->GetObjectType() != (uint16_t)NetObjEntityType::PropSet
 #endif
+		)
 		{
 			if (object->GetGameObject() == nullptr)
 			{
@@ -2469,7 +2469,7 @@ void CloneManagerLocal::WriteUpdates()
 			// set sync priority
 			object->syncData.SetCloningFrequency(31, object->GetSyncFrequency());
 
-			char* syncData = (char*)object->m_20();
+			char* syncData = (char*)object->GetSyncData();
 
 			if (syncData)
 			{
@@ -2535,7 +2535,7 @@ void CloneManagerLocal::WriteUpdates()
 					AssociateSyncTree(object->GetObjectId(), syncTree);
 
 					// instantly mark player 31 as acked
-					if (object->m_20())
+					if (object->GetSyncData())
 					{
 						// 1290
 						//((void(*)(rage::netSyncTree*, rage::netObject*, uint8_t, uint16_t, uint32_t, int))0x1415D94F0)(syncTree, object, 31, 0 /* seq? */, 0x7FFFFFFF, 0xFFFFFFFF);
@@ -2568,10 +2568,8 @@ void CloneManagerLocal::WriteUpdates()
 							netBuffer.Write(32, g_objectIdToCreationToken[objectId]);
 						}
 
-						netBuffer.Write(g_netObjectTypeBitLength, objectType);
+						netBuffer.Write(kNetObjectTypeBitLength, objectType);
 					}
-
-					//netBuffer.Write<uint32_t>(rage::netInterface_queryFunctions::GetInstance()->GetTimestamp()); // timestamp?
 
 					uint32_t len = rlBuffer.GetDataLength();
 					netBuffer.Write(12, len); // length (short)

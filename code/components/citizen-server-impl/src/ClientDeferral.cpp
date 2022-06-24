@@ -85,6 +85,12 @@ bool ClientDeferral::IsDeferred()
 
 void ClientDeferral::UpdateDeferrals()
 {
+	if (!m_ranEvents)
+	{
+		m_pending = true;
+		return;
+	}
+
 	bool allDone = true;
 	bool rejected = false;
 	std::string rejectionMsg;
@@ -142,8 +148,30 @@ void ClientDeferral::UpdateDeferrals()
 	}
 }
 
+void ClientDeferral::RanEvents()
+{
+	m_ranEvents = true;
+
+	if (m_pending)
+	{
+		UpdateDeferrals();
+		m_pending = false;
+	}
+
+	if (auto card = std::move(m_nextCard); !card.empty())
+	{
+		PresentCard(card);
+	}
+}
+
 void ClientDeferral::PresentCard(const std::string& cardJson)
 {
+	if (!m_ranEvents)
+	{
+		m_nextCard = cardJson;
+		return;
+	}
+
 	if (m_cardCallback)
 	{
 		m_cardCallback(cardJson);

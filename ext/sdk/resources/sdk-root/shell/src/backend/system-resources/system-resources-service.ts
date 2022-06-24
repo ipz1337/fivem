@@ -1,5 +1,5 @@
 import { injectable, inject } from 'inversify';
-import { AppContribution } from 'backend/app/app-contribution';
+import { AppContribution } from 'backend/app/app.extensions';
 import { ConfigService } from 'backend/config-service';
 import { Deferred } from 'backend/deferred';
 import { FsService } from 'backend/fs/fs-service';
@@ -56,6 +56,8 @@ export class SystemResourcesService implements AppContribution {
 
   private available = new Deferred<boolean>();
 
+  private localHash = '';
+
   boot() {
     this.maybeUpdateSystemResources();
   }
@@ -66,6 +68,10 @@ export class SystemResourcesService implements AppContribution {
 
   getResourcePath(resourceName: SystemResource): string {
     return this.fsService.joinPath(this.configService.systemResourcesPath, SYSTEM_RESOURCES_MAPPING[resourceName] || '__INVALID_SYSTEM_RESOURCE_NAME__');
+  }
+
+  getLocalHash() {
+    return this.localHash;
   }
 
   getResourceDescriptors(resourceNames: SystemResource[]): ServerResourceDescriptor[] {
@@ -115,11 +121,17 @@ export class SystemResourcesService implements AppContribution {
     try {
       const [remoteHash, localHash] = await Promise.all([
         this.gitService.getRemoteBranchRef(this.configService.systemResourcesRoot, 'origin', 'master'),
-        this.gitService.getLocalBranchRef(this.configService.systemResourcesRoot, 'master'),
+        this.gitService.getLocalBranchRef(this.configService.systemResourcesRoot, 'HEAD'),
       ]);
 
+      this.localHash = localHash || '';
+
       if (remoteHash !== localHash) {
-        await this.gitService.fastForwrad(this.configService.systemResourcesRoot);
+        try {
+          await this.gitService.fastForward(this.configService.systemResourcesRoot);
+        } catch (e) {
+          await this.gitService.checkout(this.configService.systemResourcesRoot, 'origin/master', true);
+        }
       }
     } catch (e) {
       this.logService.error(e);

@@ -26,7 +26,7 @@
 struct cache_t
 {
 	std::string name;
-	int version;
+	int version = 0;
 	std::string manifest;
 	std::string manifestUrl;
 };
@@ -99,19 +99,34 @@ public:
 
 struct manifestFile_t
 {
-	using TTuple = std::tuple<std::string, size_t, std::array<uint8_t, 20>>;
+	using TTuple = std::tuple<std::string, int64_t, std::array<uint8_t, 20>>;
 
 	std::string name;
-	size_t downloadSize = 0;
-	size_t localSize = 0;
+	int64_t downloadSize = 0;
+	int64_t localSize = 0;
 	bool compressed = false;
 	bool hash256Valid = false;
+	compressionAlgo_e algorithm = compressionAlgo_e::XZ;
 	std::array<uint8_t, 20> hash = { 0 };
 	std::array<uint8_t, 32> hash256 = { 0 };
 
 	TTuple ToTuple() const
 	{
 		return { name, localSize, hash };
+	}
+
+	std::string_view AlgoSuffix() const
+	{
+		switch (algorithm)
+		{
+			case compressionAlgo_e::XZ:
+				return ".xz";
+			case compressionAlgo_e::Zstd:
+				return ".zst";
+			case compressionAlgo_e::None:
+			default:
+				return "";
+		}
 	}
 };
 
@@ -146,13 +161,25 @@ public:
 			manifestFile_t file;
 			file.name = fileElement->Attribute("Name");
 
-			int size, compressedSize;
-			size = atoi(fileElement->Attribute("Size"));
-			compressedSize = atoi(fileElement->Attribute("CompressedSize"));
+			int64_t size, compressedSize, compressedSizeZstd;
+			size = strtoll(fileElement->Attribute("Size"), nullptr, 10);
+			compressedSize = strtoll(fileElement->Attribute("CompressedSize"), nullptr, 10);
+			compressedSizeZstd = 0;
+
+			if (auto zstdSize = fileElement->Attribute("CompressedSizeZstd"))
+			{
+				compressedSizeZstd = strtoll(zstdSize, nullptr, 10);
+				file.algorithm = compressionAlgo_e::Zstd;
+			}
 
 			file.compressed = (size != compressedSize);
 			file.downloadSize = compressedSize;
 			file.localSize = size;
+
+			if (!file.compressed)
+			{
+				file.algorithm = compressionAlgo_e::None;
+			}
 
 			ParseHash(fileElement->Attribute("SHA1Hash"), file.hash.data());
 
@@ -282,13 +309,23 @@ bool Updater_RunUpdate(std::initializer_list<std::string> wantedCachesList)
 	cacheFile_t localCacheFile;
 	std::list<std::tuple<std::optional<cache_ptr>, cache_ptr>> needsUpdate;
 
-	// workaround: if the user removed citizen/, make sure we re-verify, as that's just silly
+	// workaround: if the user removed citizen/ (or its contents), make sure we re-verify, as that's just silly
 	bool shouldVerify = false;
 
-	if (GetFileAttributesW(MakeRelativeCitPath(L"citizen/").c_str()) == INVALID_FILE_ATTRIBUTES)
+	if (GetFileAttributesW(MakeRelativeCitPath(L"citizen/").c_str()) == INVALID_FILE_ATTRIBUTES ||
+		GetFileAttributesW(MakeRelativeCitPath(L"citizen/version.txt").c_str()) == INVALID_FILE_ATTRIBUTES ||
+		GetFileAttributesW(MakeRelativeCitPath(L"citizen/release.txt").c_str()) == INVALID_FILE_ATTRIBUTES)
 	{
 		shouldVerify = true;
 	}
+
+	// additional check for Five/RDR
+#if defined(GTA_FIVE) || defined(IS_RDR3)
+	if (GetFileAttributesW(MakeRelativeCitPath(L"citizen/ros/ros.crt").c_str()) == INVALID_FILE_ATTRIBUTES)
+	{
+		shouldVerify = true;
+	}
+#endif
 
 	FILE* cachesReader = NULL;
 	
@@ -422,15 +459,13 @@ bool Updater_RunUpdate(std::initializer_list<std::string> wantedCachesList)
 	UI_DoCreation();
 	CL_InitDownloadQueue();
 
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
-
 	uint64_t fileStart = 0;
 	uint64_t fileTotal = 0;
 
 	for (auto& filePair : queuedFiles)
 	{
 		struct _stat64 stat;
-		if (_wstat64(MakeRelativeCitPath(converter.from_bytes(filePair.second.name)).c_str(), &stat) >= 0)
+		if (_wstat64(MakeRelativeCitPath(ToWide(filePair.second.name)).c_str(), &stat) >= 0)
 		{
 			// if the size is wrong.. why verify? -> we don't count this file so don't add it to verifying
 			if (stat.st_size == filePair.second.localSize)
@@ -457,7 +492,7 @@ bool Updater_RunUpdate(std::initializer_list<std::string> wantedCachesList)
 			formattedHash << fmt::sprintf("%02X", (uint32_t)b);
 		}
 
-		bool fileOutdated = CheckFileOutdatedWithUI(MakeRelativeCitPath(converter.from_bytes(file.name)).c_str(), { hashEntry }, &fileStart, fileTotal, nullptr, filePair.second.localSize);
+		bool fileOutdated = CheckFileOutdatedWithUI(MakeRelativeCitPath(ToWide(file.name)).c_str(), { hashEntry }, &fileStart, fileTotal, nullptr, filePair.second.localSize);
 
 		if (fileOutdated)
 		{
@@ -467,10 +502,10 @@ bool Updater_RunUpdate(std::initializer_list<std::string> wantedCachesList)
 				hashString << fmt::sprintf("%02x", b);
 			}
 
-			std::string url = GetObjectURL(hashString.str(), (file.compressed) ? ".xz" : "");
-			std::string outPath = converter.to_bytes(MakeRelativeCitPath(converter.from_bytes(file.name)));
+			std::string url = GetObjectURL(hashString.str(), file.AlgoSuffix());
+			std::string outPath = ToNarrow(MakeRelativeCitPath(ToWide(file.name)));
 
-			CL_QueueDownload(url.c_str(), outPath.c_str(), file.downloadSize, file.compressed);
+			CL_QueueDownload(url.c_str(), outPath.c_str(), file.downloadSize, file.algorithm);
 		}
 	}
 
@@ -483,7 +518,7 @@ bool Updater_RunUpdate(std::initializer_list<std::string> wantedCachesList)
 	for (const auto& [name, size] : deleteFiles)
 	{
 		struct _stat64 stat;
-		auto fn = MakeRelativeCitPath(converter.from_bytes(name));
+		auto fn = MakeRelativeCitPath(ToWide(name));
 		if (_wstat64(fn.c_str(), &stat) >= 0)
 		{
 			if (stat.st_size == size)
@@ -558,7 +593,6 @@ bool CheckFileOutdatedWithUI(const wchar_t* fileName, const std::vector<std::arr
 	bool fileOutdated = true;
 
 	HANDLE hFile = CreateFile(fileName, GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-	HANDLE hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 
 	if (hFile != INVALID_HANDLE_VALUE)
 	{
@@ -617,13 +651,13 @@ bool CheckFileOutdatedWithUI(const wchar_t* fileName, const std::vector<std::arr
 				overlapped.OffsetHigh = fileOffset >> 32;
 				overlapped.Offset = fileOffset;
 
-				char buffer[131072];
-				if (ReadFile(hFile, buffer, sizeof(buffer), NULL, &overlapped) == FALSE)
+				std::vector<char> buffer(131072);
+				if (ReadFile(hFile, buffer.data(), buffer.size(), NULL, &overlapped) == FALSE)
 				{
 					if (GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_HANDLE_EOF)
 					{
 						UI_DisplayError(va(L"Reading of %s failed with error %i.", fileName, GetLastError()));
-						return false;
+						return true;
 					}
 
 					if (GetLastError() == ERROR_HANDLE_EOF)
@@ -661,9 +695,9 @@ bool CheckFileOutdatedWithUI(const wchar_t* fileName, const std::vector<std::arr
 				BOOL olResult = GetOverlappedResult(hFile, &overlapped, &bytesRead, FALSE);
 				DWORD err = GetLastError();
 
-				SHA1_Update(&ctx, (uint8_t*)buffer, bytesRead);
+				SHA1_Update(&ctx, (uint8_t*)buffer.data(), bytesRead);
 
-				if (bytesRead < sizeof(buffer) || (!olResult && err == ERROR_HANDLE_EOF))
+				if (bytesRead < buffer.size() || (!olResult && err == ERROR_HANDLE_EOF))
 				{
 					doneReading = true;
 				}
@@ -688,17 +722,17 @@ bool CheckFileOutdatedWithUI(const wchar_t* fileName, const std::vector<std::arr
 
 			*fileStart += fileOffset;
 
-			uint8_t outHash[20];
-			SHA1_Final(outHash, &ctx);
+			std::array<uint8_t, 20> outHash;
+			SHA1_Final(outHash.data(), &ctx);
 
 			if (foundHash)
 			{
-				memcpy(foundHash->data(), outHash, foundHash->size());
+				*foundHash = outHash;
 			}
 
 			for (auto& hash : validHashes)
 			{
-				if (memcmp(hash.data(), outHash, 20) == 0)
+				if (hash == outHash)
 				{
 					fileOutdated = false;
 				}
@@ -708,15 +742,25 @@ bool CheckFileOutdatedWithUI(const wchar_t* fileName, const std::vector<std::arr
 		CloseHandle(hFile);
 	}
 
-	CloseHandle(hEvent);
-
 	return fileOutdated;
+}
+
+static std::string updateChannel;
+
+void ResetUpdateChannel()
+{
+	std::wstring fpath = MakeRelativeCitPath(L"CitizenFX.ini");
+
+	if (GetFileAttributes(fpath.c_str()) != INVALID_FILE_ATTRIBUTES)
+	{
+		WritePrivateProfileString(L"Game", L"UpdateChannel", L"production", fpath.c_str());
+	}
+
+	updateChannel = "";
 }
 
 const char* GetUpdateChannel()
 {
-	static std::string updateChannel;
-
 	if (!updateChannel.size())
 	{
 		std::wstring fpath = MakeRelativeCitPath(L"CitizenFX.ini");
@@ -739,6 +783,21 @@ const char* GetUpdateChannel()
 		if (updateChannel == "prod")
 		{
 			updateChannel = "production";
+		}
+
+		// check file age, and revert to 'beta' if it's old
+		if (updateChannel == "canary")
+		{
+			struct _stati64 st;
+			if (_wstati64(fpath.c_str(), &st) >= 0)
+			{
+				// Mon Jan 03 2022 12:00:00 GMT+0000
+				if (st.st_mtime < 1641211200)
+				{
+					updateChannel = "beta";
+					WritePrivateProfileString(L"Game", L"UpdateChannel", L"beta", fpath.c_str());
+				}
+			}
 		}
 	}
 

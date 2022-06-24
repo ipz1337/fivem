@@ -10,11 +10,7 @@
 #if defined(GTA_FIVE) || defined(IS_RDR3)
 #include <Hooking.h>
 
-#if defined(IS_RDR3)
-static uintptr_t g_currentStub = 0x148000000;
-#else
-static uintptr_t g_currentStub = 0x146000000;
-#endif
+static uintptr_t g_currentStub = hook::exe_end();
 
 extern "C"
 {
@@ -70,7 +66,7 @@ static InitFunction initFunction([]()
 	{
 		if (getenv("CitizenFX_ToolMode"))
 		{
-			g_currentStub = 0x140000000 + 0x02E23600;
+			g_currentStub = 0x140000000 + 0x0339A600;
 		}
 	}
 #endif

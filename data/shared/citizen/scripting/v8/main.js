@@ -1,5 +1,4 @@
 // CFX JS runtime
-/// <reference path="./natives_blank.d.ts" />
 /// <reference path="./natives_server.d.ts" />
 
 const EXT_FUNCREF = 10;
@@ -161,7 +160,7 @@ const EXT_LOCALFUNCREF = 11;
 								cb([v], null);
 						}).catch(err => {
 							if (cb != null)
-								cb(null, err);
+								cb(null, err.message)
 						});
 					}}]);
 				}
@@ -400,7 +399,7 @@ const EXT_LOCALFUNCREF = 11;
 
 	function processErrorQueue() {
 		for (const error of errorQueue) {
-			console.log(error.error);
+			console.log(getError('promise (unhandled)', error.error));
 		}
 
 		errorQueue = [];
@@ -413,13 +412,17 @@ const EXT_LOCALFUNCREF = 11;
 			let error = '';
 
 			if (value instanceof Error) {
-				error = getError('promise (unhandled)', value);
+				error = value;
 			} else {
-				error = getError('promise (unhandled)', new Error((value || '').toString()));
+				error = new Error((value || '').toString());
 			}
+
+			// grab the stack early so it'll remain valid
+			const stack = error.stack;
 
 			errorQueue.push({
 				error,
+				stack,
 				promise
 			});
 
@@ -591,7 +594,8 @@ const EXT_LOCALFUNCREF = 11;
 
 			set(_, k, v) {
 				const payload = msgpack_pack(v);
-				return SetStateBagValue(es, k, payload, payload.length, isDuplicityVersion);
+				SetStateBagValue(es, k, payload, payload.length, isDuplicityVersion);
+				return true; // If the set() method returns false, and the assignment happened in strict-mode code, a TypeError will be thrown.
 			},
 		});
 	};
@@ -682,6 +686,10 @@ const EXT_LOCALFUNCREF = 11;
 
 		return ent;
 	};
+
+	if (!isDuplicityVersion) {
+		global.LocalPlayer = Player(-1);
+	}
 
 	/*
 	BEGIN

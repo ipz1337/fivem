@@ -1,5 +1,4 @@
-import { ResourceManifest } from "assets/resource/resource-manifest";
-import { APIRQ } from "shared/api.requests";
+import { ResourceManifest } from "fxdk/contrib/assets/resource/common/resourceManifest";
 
 export interface ResourceTemplateDescriptor {
   id: string,
@@ -12,9 +11,10 @@ export interface ResourceTemplateDescriptor {
 }
 
 export interface ResourceTemplateScaffolderArgs {
-  request: APIRQ.AssetCreate<{ resourceTemplateId?: string }>,
   manifest: ResourceManifest,
+  resourceName: string,
   resourcePath: string,
+  resourceTemplateId: string,
 }
 
 export interface ResourceTemplateScaffolder {

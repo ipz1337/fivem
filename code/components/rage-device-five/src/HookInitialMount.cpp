@@ -93,11 +93,20 @@ static bool OpenArchiveWrapSeh(rage::fiPackfile* packfile, const char* archive, 
 	}
 }
 
+static decltype(&OpenArchiveWrapSeh) g_packfileWrap = &OpenArchiveWrapSeh;
+
+void* WrapPackfile(void* newFunc)
+{
+	auto pfw = g_packfileWrap;
+	g_packfileWrap = (decltype(g_packfileWrap))newFunc;
+	return pfw;
+}
+
 static bool OpenArchiveWrapInner(rage::fiPackfile* packfile, const char* archive, bool a3, int a4, intptr_t a5)
 {
 	currentPack = archive;
 
-	bool retval = OpenArchiveWrapSeh(packfile, archive, a3, a4, a5);
+	bool retval = g_packfileWrap(packfile, archive, a3, a4, a5);
 
 	currentPack = "";
 
@@ -162,8 +171,23 @@ static void PackfileEncryptionError()
 		ToNarrow(MakeRelativeGamePath(L"")));
 }
 
+static void CorruptedErrorCodes()
+{
+	FatalError("Corrupted Error Code File.\n"
+			   "Currently, the installation directory %s is being used.\n\n"
+			   "Please verify your game files, see http://rsg.ms/verify for more information on doing so.",
+	ToNarrow(MakeRelativeGamePath(L"")));
+}
+
 static HookFunction hookFunction([] ()
 {
+	// errorcodes loading failure
+	{
+		auto location = hook::get_pattern<char>("C3 33 D2 33 C9 E8 ? ? ? ? ? 33 D2", 5);
+		hook::call(location, CorruptedErrorCodes);
+		hook::call(location + 10, CorruptedErrorCodes);
+	}
+
 	// increase non-DLC fiDevice mount limit
 	{
 		// GTA project initialization code, arxan-obfuscated

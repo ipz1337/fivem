@@ -119,13 +119,15 @@ std::string GetExternalSteamTicket()
 	return "";
 }
 
+std::string g_rosEmail;
+
 std::string GetROSEmail()
 {
 	static HostSharedData<ExternalROSBlob> blob("Cfx_ExtRosBlob");
 
 	if (!blob->valid)
 	{
-		return "";
+		return g_rosEmail;
 	}
 
 	auto accountBlob = blob->data;
@@ -593,6 +595,7 @@ void ValidateEpic(int parentPid)
 	strcpy((char*)&blob->data[3312], tree.get<std::string>("Response.SessionTicket").c_str());
 	memcpy(&blob->data[0x10D8], sessionKey.data(), sessionKey.size());
 	strcpy((char*)&blob->data[8], j.value("Email", "").c_str());
+	strcpy((char*)&blob->data[0xE9F], j.value("Nickname", "").c_str());
 
 	j = nlohmann::json::object({
 #ifdef IS_RDR3
@@ -747,6 +750,7 @@ void ValidateSteam(int parentPid)
 	strcpy((char*)&blob->data[3312], tree.get<std::string>("Response.SessionTicket").c_str());
 	memcpy(&blob->data[0x10D8], sessionKey.data(), sessionKey.size());
 	strcpy((char*)&blob->data[8], j.value("Email", "").c_str());
+	strcpy((char*)&blob->data[0xE9F], j.value("Nickname", "").c_str());
 
 	j = nlohmann::json::object({
 		{ "title", appName },
@@ -933,7 +937,8 @@ static bool InitAccountRemote()
 
 static HookFunction hookFunction([]()
 {
-	Instance<ICoreGameInit>::Get()->SetData("rosUserName", (const char*)&accountBlob[8]);
+	Instance<ICoreGameInit>::Get()->SetData("rosUserName", (const char*)&accountBlob[0xE9F]);
+	Instance<ICoreGameInit>::Get()->SetData("rosUserEmail", (const char*)&accountBlob[8]);
 });
 #endif
 #else
@@ -1194,6 +1199,10 @@ static HookFunction hookFunctionSteamBlob([]()
 
 			*useSteam = 1;
 			*steamAppId = strdup(va("%d", blob->steamAppId));
+
+			// Steam language takes precedence over the -rglLanguage CLI argument (if the Steam API returned a known language)
+			// This is inconsistent so we'll treat this like any other platform, ignoring the Steam language.
+			hook::put<uint8_t>(hook::get_pattern("44 38 25 ? ? ? ? 74 15 48 8B", 7), 0xEB);
 		}
 		else if (blob->epicSize)
 		{

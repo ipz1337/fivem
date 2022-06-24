@@ -3,6 +3,7 @@
 #include <MinHook.h>
 
 #include <CrossBuildRuntime.h>
+#include <USKeyboardMapping.h>
 
 enum KeyboardKeys
 {
@@ -234,12 +235,10 @@ static void* g_controlData;
 template<typename TClass>
 static void UpdateControlData(TClass* a1)
 {
-	auto hkl = LoadKeyboardLayoutW(L"00000409", 0);
-
 	for (auto& key : mappedKeys)
 	{
 		// first, map the US VK to a scan code
-		auto scanCode = MapVirtualKeyExW(key, MAPVK_VK_TO_VSC, hkl);
+		auto scanCode = MapVirtualKeyInternal(key, MAPVK_VK_TO_VSC);
 
 		// then, map the scan code to a localized vkey
 		auto vk = MapVirtualKey(scanCode, MAPVK_VSC_TO_VK);
@@ -256,9 +255,6 @@ static void UpdateControlData(TClass* a1)
 		// finally, copy to the output
 		strcpy_s(a1->keys[key].text, text.c_str());
 	}
-
-	// HKL isn't reference counted, this would unload the US keyboard layout for any non-US system, leading to mapping breaking!
-	//UnloadKeyboardLayout(hkl);
 }
 
 template<typename TClass>
@@ -295,6 +291,17 @@ static HookFunction hookFunction([]()
 	if (Is372())
 	{
 		return;
+	}
+
+	{
+		// Disable loading of en-US layout in _initKeyboard, we tap into kbdus directly
+		auto enKeyboardInitBlock = hook::get_pattern<uint8_t>("40 8A C6 48 39 35 ? ? ? ? 75 08 84 C0 0F 84 ? ? ? ? 33 D2 33 C9", 3);
+		hook::nop(enKeyboardInitBlock, 12);
+		hook::put<uint8_t>(enKeyboardInitBlock + 12, 0xE9);
+
+		// Ditch built-in MapGameKey impl for our reimplementation so graceful handling of non-QWERTY layouts is kept (game's depends on layout skipped above)
+		auto mapGameKeyFunc = hook::get_pattern("48 89 5C 24 08 57 48 83 EC 20 41 8A D8 8B FA 83 F9 13");
+		hook::jump(mapGameKeyFunc, MapGameKey);
 	}
 
 	{

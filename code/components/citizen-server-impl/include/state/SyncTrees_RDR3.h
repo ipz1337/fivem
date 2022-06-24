@@ -14,7 +14,25 @@
 
 namespace fx::sync
 {
-struct CVehicleCreationDataNode { bool Parse(SyncParseState& state) { return true; } };
+struct CVehicleCreationDataNode : GenericSerializeDataNode<CVehicleCreationDataNode>
+{ 
+	uint32_t m_model;
+	ePopType m_popType;
+
+	template<typename Serializer>
+	bool Serialize(Serializer& s)
+	{
+		// model
+		s.Serialize(32, m_model);
+
+		// 4
+		auto popType = (int)m_popType;
+		s.Serialize(4, popType);
+		m_popType = (ePopType)popType;
+
+		return true; 
+	} 
+};
 
 struct CAutomobileCreationDataNode { bool Parse(SyncParseState& state) { return true; } };
 
@@ -241,7 +259,25 @@ struct CSectorPositionDataNode
 	}
 };
 
-struct CPedCreationDataNode { bool Parse(SyncParseState& state) { return true; } };
+struct CPedCreationDataNode : GenericSerializeDataNode<CPedCreationDataNode>
+{ 
+	uint32_t m_model;
+	ePopType m_popType;
+
+	template<typename TSerializer>
+	bool Serialize(TSerializer& s)
+	{ 
+		// 4
+		auto popType = (int)m_popType;
+		s.Serialize(4, popType);
+		m_popType = (ePopType)popType;
+
+		// model
+		s.Serialize(32, m_model);
+
+		return true;
+	}
+};
 
 struct CPedGameStateDataNode
 {
@@ -352,7 +388,18 @@ struct CDoorCreationDataNode
 	}
 };
 
-struct CVehicleSteeringDataNode { bool Parse(SyncParseState& state) { return true; } };
+struct CVehicleSteeringDataNode
+{
+	CVehicleSteeringNodeData data;
+
+	bool Parse(SyncParseState& state)
+	{
+		data.steeringAngle = state.buffer.ReadSignedFloat(10, 1.0f);
+
+		return true;
+	}
+};
+
 struct CVehicleControlDataNode { bool Parse(SyncParseState& state) { return true; } };
 struct CVehicleGadgetDataNode { bool Parse(SyncParseState& state) { return true; } };
 struct CMigrationDataNode { bool Parse(SyncParseState& state) { return true; } };
@@ -1198,6 +1245,18 @@ struct SyncTree : public SyncTreeBase
 		return nullptr;
 	}
 
+	virtual CHeliHealthNodeData* GetHeliHealth() override
+	{
+		return nullptr;
+	}
+
+	virtual CVehicleSteeringNodeData* GetVehicleSteeringData() override
+	{
+		auto [hasNode, node] = GetData<CVehicleSteeringDataNode>();
+
+		return hasNode ? &node->data : nullptr;
+	}
+
 	virtual void CalculatePosition() override
 	{
 		// TODO: cache it?
@@ -1205,7 +1264,6 @@ struct SyncTree : public SyncTreeBase
 
 	virtual bool GetPopulationType(ePopType* popType) override
 	{
-#if 0
 		auto[hasVcn, vehCreationNode] = GetData<CVehicleCreationDataNode>();
 
 		if (hasVcn)
@@ -1223,27 +1281,17 @@ struct SyncTree : public SyncTreeBase
 		}
 
 		// TODO: objects(?)
-#endif
 
 		return false;
 	}
 
 	virtual bool GetModelHash(uint32_t* modelHash) override
 	{
-#if 0
 		auto[hasVcn, vehCreationNode] = GetData<CVehicleCreationDataNode>();
 
 		if (hasVcn)
 		{
 			*modelHash = vehCreationNode->m_model;
-			return true;
-		}
-
-		auto[hasPan, playerAppearanceNode] = GetData<CPlayerAppearanceDataNode>();
-
-		if (hasPan)
-		{
-			*modelHash = playerAppearanceNode->model;
 			return true;
 		}
 
@@ -1254,7 +1302,7 @@ struct SyncTree : public SyncTreeBase
 			*modelHash = pedCreationNode->m_model;
 			return true;
 		}
-
+#if 0
 		auto[hasOcn, objectCreationNode] = GetData<CObjectCreationDataNode>();
 
 		if (hasOcn)
@@ -1263,6 +1311,13 @@ struct SyncTree : public SyncTreeBase
 			return true;
 		}
 #endif
+		auto[hasPan, playerAppearanceNode] = GetData<CPlayerAppearanceDataNode>();
+
+		if (hasPan)
+		{
+			*modelHash = playerAppearanceNode->model;
+			return true;
+		}
 
 		return false;
 	}

@@ -11,6 +11,8 @@
 #include <CoreConsole.h>
 #include "memdbgon.h"
 
+#include <include/cef_parser.h>
+
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.System.UserProfile.h>
 #pragma comment(lib, "runtimeobject")
@@ -189,6 +191,21 @@ void NUIApp::OnBeforeCommandLineProcessing(const CefString& process_type, CefRef
 {
 	static ConVar<bool> nuiUseInProcessGpu("nui_useInProcessGpu", ConVar_Archive, false);
 
+	static std::string defaultUiUrl = "https://nui-game-internal/ui/app/index.html";
+	static ConVar<std::string> uiUrlVar("ui_url", ConVar_None, defaultUiUrl);
+
+	if (uiUrlVar.GetValue() != defaultUiUrl)
+	{
+		CefString uiUrl(uiUrlVar.GetValue());
+		CefURLParts uiUrlParts;
+
+		if (CefParseURL(uiUrl, uiUrlParts) && uiUrlParts.origin.length > 0)
+		{
+			// Allow secure context for insecure localhost
+			command_line->AppendSwitchWithValue("unsafely-treat-insecure-origin-as-secure", uiUrlParts.origin.str);
+		}
+	}
+
 	if (nuiUseInProcessGpu.GetValue())
 	{
 		command_line->AppendSwitch("in-process-gpu");
@@ -201,6 +218,7 @@ void NUIApp::OnBeforeCommandLineProcessing(const CefString& process_type, CefRef
 	command_line->AppendSwitch("disable-gpu-driver-bug-workarounds");
 	command_line->AppendSwitchWithValue("default-encoding", "utf-8");
 	command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
+	command_line->AppendSwitchWithValue("disable-features", "HardwareMediaKeyHandling");
 
 #if !GTA_NY
 	command_line->AppendSwitch("enable-gpu-rasterization");

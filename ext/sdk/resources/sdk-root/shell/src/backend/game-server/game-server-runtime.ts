@@ -1,5 +1,5 @@
 import { injectable } from "inversify";
-import { disposableFromFunction, DisposableObject } from "backend/disposable-container";
+import { disposableFromFunction, IDisposableObject } from "fxdk/base/disposable";
 import { SingleEventEmitter } from "utils/singleEventEmitter";
 import { Ticker } from "backend/ticker";
 import { ServerUpdateChannel } from "shared/api.types";
@@ -21,27 +21,46 @@ export interface ServerResourceDescriptor {
   path: string,
 }
 
+export interface ServerVariableDescriptor {
+  name: string,
+  setter: string,
+  value: string,
+}
+
 @injectable()
 export class GameServerRuntime {
-  protected serverResourcesTicker = new Ticker();
+  protected serverChangesTicker = new Ticker();
 
   protected readonly setResourcesEvent = new SingleEventEmitter<ServerResourceDescriptor[]>();
   protected serverResources: ServerResourceDescriptor[] = [];
-  onSetResources(cb: (resources: ServerResourceDescriptor[]) => void): DisposableObject {
+  onSetResources(cb: (resources: ServerResourceDescriptor[]) => void): IDisposableObject {
     return disposableFromFunction(this.setResourcesEvent.addListener(cb));
   }
   setResources(resources: ServerResourceDescriptor[]) {
     this.serverResources = resources;
 
-    // Make it emit once per tick
-    this.serverResourcesTicker.whenTickEnds(() => this.setResourcesEvent.emit(this.serverResources));
+    this.propagateChanges();
   }
   getResources(): ServerResourceDescriptor[] {
     return this.serverResources;
   }
 
+  protected readonly setVariablesEvent = new SingleEventEmitter<ServerVariableDescriptor[]>();
+  protected serverVariables: ServerVariableDescriptor[] = [];
+  onSetVariables(cb: (variables: ServerVariableDescriptor[]) => void): IDisposableObject {
+    return disposableFromFunction(this.setVariablesEvent.addListener(cb));
+  }
+  setVariables(variables: ServerVariableDescriptor[]) {
+    this.serverVariables = variables;
+
+    this.propagateChanges();
+  }
+  getVariables(): ServerVariableDescriptor[] {
+    return this.serverVariables;
+  }
+
   protected readonly startResourceEvent = new SingleEventEmitter<string>();
-  onStartResource(cb: (resourceName: string) => void): DisposableObject {
+  onStartResource(cb: (resourceName: string) => void): IDisposableObject {
     return disposableFromFunction(this.startResourceEvent.addListener(cb));
   }
   startResource(resourceName: string) {
@@ -49,7 +68,7 @@ export class GameServerRuntime {
   }
 
   protected readonly stopResourceEvent = new SingleEventEmitter<string>();
-  onStopResource(cb: (resourceName: string) => void): DisposableObject {
+  onStopResource(cb: (resourceName: string) => void): IDisposableObject {
     return disposableFromFunction(this.stopResourceEvent.addListener(cb));
   }
   stopResource(resourceName: string) {
@@ -57,7 +76,7 @@ export class GameServerRuntime {
   }
 
   protected readonly restartResourceEvent = new SingleEventEmitter<string>();
-  onRestartResource(cb: (resourceName: string) => void): DisposableObject {
+  onRestartResource(cb: (resourceName: string) => void): IDisposableObject {
     return disposableFromFunction(this.restartResourceEvent.addListener(cb));
   }
   restartResource(resourceName: string) {
@@ -65,7 +84,7 @@ export class GameServerRuntime {
   }
 
   protected readonly reloadResourceEvent = new SingleEventEmitter<string>();
-  onReloadResource(cb: (resourceName: string) => void): DisposableObject {
+  onReloadResource(cb: (resourceName: string) => void): IDisposableObject {
     return disposableFromFunction(this.reloadResourceEvent.addListener(cb));
   }
   reloadResource(resourceName: string) {
@@ -73,7 +92,7 @@ export class GameServerRuntime {
   }
 
   protected readonly sendCommandEvent = new SingleEventEmitter<string>();
-  onSendCommand(cb: (cmd: string) => void): DisposableObject {
+  onSendCommand(cb: (cmd: string) => void): IDisposableObject {
     return disposableFromFunction(this.sendCommandEvent.addListener(cb));
   }
   sendCommand(cmd: string) {
@@ -86,5 +105,12 @@ export class GameServerRuntime {
   }
   requestResourcesState() {
     this.requestResourcesStateEvent.emit();
+  }
+
+  private propagateChanges() {
+    this.serverChangesTicker.whenTickEnds(() => {
+      this.setVariablesEvent.emit(this.serverVariables);
+      this.setResourcesEvent.emit(this.serverResources);
+    });
   }
 }

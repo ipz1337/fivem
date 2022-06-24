@@ -311,6 +311,11 @@ public:
 private:
 	size_t ConnectInternal(TFunc func, int order)
 	{
+		if (!func)
+		{
+			return -1;
+		}
+
 		auto cookie = m_connectCookie++;
 		auto cb = std::unique_ptr<callback>(new callback(func));
 		cb->order = order;
@@ -341,6 +346,11 @@ private:
 public:
 	void Disconnect(size_t cookie)
 	{
+		if (cookie == -1)
+		{
+			return;
+		}
+
 		callback* prev = nullptr;
 
 		for (auto cb = m_callbacks.get(); cb; cb = cb->next.get())
@@ -381,9 +391,13 @@ public:
 			return true;
 		}
 
-		for (auto cb = m_callbacks.get(); cb; cb = cb->next.get())
+		decltype(m_callbacks.get()) next = {};
+
+		for (auto cb = m_callbacks.get(); cb; cb = next)
 		{
-			if (cb->function && !std::invoke(cb->function, args...))
+			next = cb->next.get();
+
+			if (!std::invoke(cb->function, args...))
 			{
 				return false;
 			}

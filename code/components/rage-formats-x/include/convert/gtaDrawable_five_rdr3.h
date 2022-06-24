@@ -38,6 +38,9 @@ enum
 
 namespace rage
 {
+template<>
+rdr3::phBound* convert(five::phBound* bound);
+
 enum class FVFType
 {
 	Nothing = 0,
@@ -721,9 +724,13 @@ rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 				std::array<uint8_t, 16> value;
 				memcpy(value.data(), params[i].GetValue(), 16);
 
-				if (pn == HashString("Specular"))
+				if (pn == HashString("SpecularColor"))
 				{
-					*(float*)(value.data()) /= 40.f;
+					*(float*)(value.data()) /= 4.f;
+				}
+				else if (pn == HashString("Specular"))
+				{
+					*(float*)(value.data()) /= 160.f;
 				}
 
 				paramRefs.emplace_back(pn, value);
@@ -821,16 +828,20 @@ inline void ConvertBaseDrawable(five::rmcDrawable* drawable, rdr3::gtaDrawable* 
 
 	for (int i = 0; i < 4; i++)
 	{
-		auto oldModel = oldLodGroup.GetModel(i);
+		auto oldLod = oldLodGroup.GetLod(i);
 
-		if (oldModel)
+		if (oldLod)
 		{
-			auto newModel = convert<rdr3::grmModel*>(oldModel);
+			size_t numModels = 0;
+			rage::rdr3::grmModel* newModels[64];
 
-			lodGroup.SetModel(i, newModel);
-			lodGroup.SetDrawBucketMask(i, oldLodGroup.GetDrawBucketMask(i));
-
+			for (auto mI = 0; mI < oldLod->GetCount(); mI++)
 			{
+				auto oldModel = oldLod->Get(mI);
+				auto newModel = convert<rdr3::grmModel*>(oldModel);
+				newModels[mI] = newModel;
+				numModels++;
+
 				auto oldBounds = oldModel->GetGeometryBounds();
 
 				int extraSize = 0;
@@ -848,10 +859,11 @@ inline void ConvertBaseDrawable(five::rmcDrawable* drawable, rdr3::gtaDrawable* 
 
 				newModel->SetGeometryBounds(newModel->GetGeometries().GetCount() + extraSize, (rage::rdr3::GeometryBound*)oldBounds);
 			}
+
+			lodGroup.SetLod(i, newModels, numModels);
+			lodGroup.SetDrawBucketMask(i, oldLodGroup.GetDrawBucketMask(i));
 		}
 	}
-
-	out->SetName("drawable_from_redm_exporter_see_redm.gg.#dr");
 }
 
 template<>
@@ -860,6 +872,21 @@ rdr3::gtaDrawable* convert(five::gtaDrawable* drawable)
 	auto out = new (false) rdr3::gtaDrawable;
 
 	ConvertBaseDrawable(drawable, out);
+
+	if (auto bound = drawable->GetBound())
+	{
+		auto newBound = convert<rdr3::phBound*>(bound);
+		out->SetBound(newBound);
+	}
+
+	auto name = std::string(drawable->GetName());
+
+	if (name.find("redm.net") == std::string::npos)
+	{
+		name = "redm.net_" + name;
+	}
+
+	out->SetName(name.c_str());
 
 	return out;
 }

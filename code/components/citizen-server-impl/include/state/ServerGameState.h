@@ -77,6 +77,26 @@ inline bool Is2372()
 	return value;
 }
 
+inline bool Is2545()
+{
+	static bool value = ([]()
+	{
+		return fx::GetEnforcedGameBuildNumber() >= 2545;
+	})();
+
+	return value;
+}
+
+inline bool Is2612()
+{
+	static bool value = ([]()
+	{
+		return fx::GetEnforcedGameBuildNumber() >= 2612;
+	})();
+
+	return value;
+}
+
 template<typename T>
 inline constexpr T roundToWord(T val)
 {
@@ -458,6 +478,17 @@ struct CPlayerGameStateNodeData
 	bool isSuperJumpEnabled;
 };
 
+struct CHeliHealthNodeData
+{
+	int mainRotorHealth;
+	int tailRotorHealth;
+};
+
+struct CVehicleSteeringNodeData
+{
+	float steeringAngle;
+};
+
 enum ePopType
 {
 	POPTYPE_UNKNOWN = 0,
@@ -537,6 +568,10 @@ public:
 	virtual CObjectGameStateNodeData* GetObjectGameState() = 0;
 
 	virtual CDummyObjectCreationNodeData* GetDummyObjectState() = 0;
+
+	virtual CHeliHealthNodeData* GetHeliHealth() = 0;
+
+	virtual CVehicleSteeringNodeData* GetVehicleSteeringData() = 0;
 
 	virtual void CalculatePosition() = 0;
 
@@ -628,6 +663,7 @@ struct SyncEntityState
 	// #IFARQ this means lastFramesSent
 	std::array<uint64_t, MAX_CLIENTS> lastFramesPreSent;
 
+	std::chrono::milliseconds createdAt{ 0 };
 	std::chrono::milliseconds lastReceivedAt;
 	std::chrono::milliseconds lastMigratedAt;
 
@@ -645,13 +681,34 @@ struct SyncEntityState
 
 	std::list<std::function<void(const fx::ClientSharedPtr& ptr)>> onCreationRPC;
 
+private:
+	std::shared_mutex stateBagPtrMutex;
 	std::shared_ptr<fx::StateBag> stateBag;
 
+public:
 	SyncEntityState();
 
 	SyncEntityState(const SyncEntityState&) = delete;
 
 	virtual ~SyncEntityState();
+
+	inline bool HasStateBag()
+	{
+		std::shared_lock _(stateBagPtrMutex);
+		return (stateBag) ? true : false;
+	}
+
+	inline auto GetStateBag()
+	{
+		std::shared_lock _(stateBagPtrMutex);
+		return stateBag;
+	}
+
+	inline void SetStateBag(std::shared_ptr<fx::StateBag>&& newStateBag)
+	{
+		std::unique_lock _(stateBagPtrMutex);
+		stateBag = std::move(newStateBag);
+	}
 
 	inline float GetDistanceCullingRadius(float playerCullingRadius)
 	{
@@ -1075,6 +1132,11 @@ public:
 
 	void ForAllEntities(const std::function<void(sync::Entity*)>& cb);
 
+	inline auto GetServerInstance() const
+	{
+		return m_instance;
+	}
+
 private:
 	void ProcessCloneCreate(const fx::ClientSharedPtr& client, rl::MessageBuffer& inPacket, AckPacketWrapper& ackPacket);
 
@@ -1099,6 +1161,12 @@ private:
 	bool ValidateEntity(EntityLockdownMode entityLockdownMode, const fx::sync::SyncEntityPtr& entity);
 
 public:
+	std::function<bool()> GetGameEventHandler(const fx::ClientSharedPtr& client, const std::vector<uint16_t>& targetPlayers, net::Buffer&& buffer);
+
+private:
+	std::function<bool()> GetRequestControlEventHandler(const fx::ClientSharedPtr& client, net::Buffer&& buffer);
+
+public:
 	fx::sync::SyncEntityPtr GetEntity(uint8_t playerId, uint16_t objectId);
 	fx::sync::SyncEntityPtr GetEntity(uint32_t handle);
 
@@ -1107,7 +1175,9 @@ public:
 private:
 	fx::ServerInstanceBase* m_instance;
 
+#ifdef USE_ASYNC_SCL_POSTING
 	std::unique_ptr<ThreadPool> m_tg;
+#endif
 
 	// as bitset is not thread-safe
 	std::shared_mutex m_objectIdsMutex;
@@ -1204,7 +1274,11 @@ private:
 public:
 	bool MoveEntityToCandidate(const fx::sync::SyncEntityPtr& entity, const fx::ClientSharedPtr& client);
 
-	void SendPacket(int peer, std::string_view data);
+	void SendPacket(int peer, std::string_view data) override;
+
+	bool IsAsynchronous() override;
+
+	void QueueTask(std::function<void()>&& task) override;
 
 	inline const fwRefContainer<fx::StateBagComponent>& GetStateBags()
 	{

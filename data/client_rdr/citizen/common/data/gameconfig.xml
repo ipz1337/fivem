@@ -947,7 +947,7 @@
                 </Item>
                 <Item>
                   <PoolName>CScriptEntityExtension</PoolName>
-                  <PoolSize value="600"/>
+                  <PoolSize value="10000"/>
                 </Item>
                 <Item>
                   <PoolName>CScriptEntityIdExtension</PoolName>
@@ -1051,7 +1051,7 @@
                 </Item>
                 <Item>
                   <PoolName>Dummy Object</PoolName>
-                  <PoolSize value="13500"/>
+                  <PoolSize value="30000"/>
                 </Item>
                 <Item>
                   <PoolName>CPropSetObjectExtension</PoolName>
@@ -1291,7 +1291,7 @@
                 </Item>
                 <Item>
                   <PoolName>CLightEntity</PoolName>
-                  <PoolSize value="4400"/>
+                  <PoolSize value="8800"/>
                 </Item>
                 <Item>
                   <PoolName>MapDataLoadedNode</PoolName>
@@ -1299,11 +1299,11 @@
                 </Item>
                 <Item>
                   <PoolName>MapDataStore</PoolName>
-                  <PoolSize value="8100"/>
+                  <PoolSize value="15000"/>
                 </Item>
                 <Item>
                   <PoolName>MapTypesStore</PoolName>
-                  <PoolSize value="2600"/>
+                  <PoolSize value="3200"/>
                 </Item>
                 <Item>
                   <PoolName>MetaDataStore</PoolName>
@@ -1485,7 +1485,7 @@
 				</Item>
                 <Item>
 					<PoolName>PortalInst</PoolName>
-					<PoolSize value="300" />
+					<PoolSize value="600" />
 				</Item>
 				<Item>
                   <PoolName>PoseMatcherStore</PoolName>
@@ -1598,7 +1598,7 @@
                 </Item>
                 <Item>
                   <PoolName>atDScriptObjectNode</PoolName>
-                  <PoolSize value="500"/>
+                  <PoolSize value="10000"/>
                 </Item>
                 <Item>
                   <PoolName>CRemoteScriptArgs</PoolName>
@@ -1724,10 +1724,18 @@
           <PoolName>CScenarioPropManager::ActiveSchedule</PoolName>
           <PoolSize value="32"/>
         </Item>
-                <Item>
-	              <PoolName>CGameScriptHandlerNetwork</PoolName>
-	              <PoolSize value="50"/>
-	            </Item>
+        <Item>
+          <PoolName>CGameScriptHandlerNetwork</PoolName>
+          <PoolSize value="750"/>
+        </Item>
+        <Item>
+          <PoolName>CGameScriptHandlerNetComponent</PoolName>
+          <PoolSize value="850"/>
+        </Item>
+        <Item>
+          <PoolName>CGameScriptHandler</PoolName>
+          <PoolSize value="750"/>
+        </Item>
 				<Item>
 					<PoolName>NavMeshRoute</PoolName>
 					<PoolSize value="200"/>

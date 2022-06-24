@@ -6,9 +6,9 @@ import Flatbush from 'flatbush';
 import { WEEntityMatrixIndex, WEMap } from "./world-editor-types";
 import { concurrently } from "utils/concurrently";
 import { joaat } from "utils/joaat";
-import { FXWORLD_FILE_EXT } from "assets/fxworld/fxworld-types";
 import { eulerFromMatrix } from "shared/math";
 import { WorldEditorArchetypesService } from "./world-editor-archetypes-service";
+import { FXWORLD_FILE_EXT } from "fxdk/contrib/assets/fxworld/common/fxworld-types";
 
 const WORLD_EDITOR_MAP_INDEX_RUNTIME = require('./world-editor-map-runtime/map-index.raw.js');
 const WORLD_EDITOR_MAP_ADDITIONS_RUNTIME = require('./world-editor-map-runtime/map-additions.raw.js');
@@ -86,7 +86,7 @@ export class WorldEditorMapCompiler {
 
       Object.entries(data.map.patches).forEach(([mapdata, entities]) => {
         loaders.push(
-          `case ${mapdata}:`,
+          `case ${mapdata}:{`,
           'const m=GetMapdataFromHashKey(md);',
         );
 
@@ -112,7 +112,7 @@ export class WorldEditorMapCompiler {
         });
 
         loaders.push(
-          'break',
+          'break}',
         );
       });
 

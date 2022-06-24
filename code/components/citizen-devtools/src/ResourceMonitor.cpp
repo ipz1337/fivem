@@ -24,24 +24,191 @@
 
 using namespace std::chrono_literals;
 
+struct AutoConnect
+{
+	AutoConnect()
+	{
+	
+	}
 
-static fx::ResourceMonitor* g_globalResourceMonitor;
+	template<typename TEvent, typename TFunc>
+	AutoConnect(TEvent& ev, TFunc&& func)
+		: AutoConnect(ev, std::move(func), 0)
+	{
+	}
 
-static tbb::concurrent_unordered_map<std::string, std::optional<ResourceMetrics>> g_metrics;
-static TickMetrics<64> g_scriptFrameMetrics;
-static TickMetrics<64> g_gameFrameMetrics;
+	template<typename TEvent, typename TFunc>
+	AutoConnect(TEvent& ev, TFunc&& func, int order)
+	{
+		auto cookie = ev.Connect(std::move(func), order);
+		dtor = [&ev, cookie]()
+		{
+			ev.Disconnect(cookie);
+		};
+	}
 
-static double g_avgScriptMs;
-static double g_avgFrameMs;
+	template<typename TEvent, typename TFunc>
+	AutoConnect(const std::shared_ptr<bool>& defuser, TEvent& ev, TFunc&& func)
+		: AutoConnect(defuser, ev, std::move(func), 0)
+	{
+	}
 
-static fx::ResourceMonitor::ResourceDatas g_resourceDatas;
-static bool g_shouldRecalculateDatas = true;
+	template<typename TEvent, typename TFunc>
+	AutoConnect(const std::shared_ptr<bool>& defuser, TEvent& ev, TFunc&& func, int order)
+		: AutoConnect(ev, func, order)
+	{
+		this->defuser = defuser;
+	}
 
+	~AutoConnect()
+	{
+		if (dtor)
+		{
+			if (!defuser || !*defuser)
+			{
+				dtor();
+			}
+
+			dtor = {};
+		}
+	}
+
+	AutoConnect(const AutoConnect& other) = delete;
+	AutoConnect(AutoConnect&& other) = default;
+
+private:
+	std::function<void()> dtor;
+	std::shared_ptr<bool> defuser;
+};
+
+struct Stopwatch;
+
+namespace fx
+{
+struct ResourceMonitorImpl : public ResourceMonitorImplBase
+{
+	ResourceMonitorImpl()
+		: tickIndex(std::make_shared<uint64_t>(0)), scriptFrameMetrics(tickIndex), gameFrameMetrics(tickIndex)
+	{
+		
+	}
+
+	virtual ~ResourceMonitorImpl() = default;
+
+	std::shared_ptr<uint64_t> tickIndex;
+
+	std::mutex metricsMutex;
+	tbb::concurrent_unordered_map<std::string, std::shared_ptr<ResourceMetrics>> metrics;
+	TickMetrics<64> scriptFrameMetrics;
+	TickMetrics<64> gameFrameMetrics;
+
+	double avgScriptMs = 0.0;
+	double avgFrameMs = 0.0;
+
+	fx::ResourceMonitor::ResourceDatas resourceDatas;
+	bool shouldRecalculateDatas = true;
+
+	std::list<AutoConnect> events;
+	std::unordered_map<fx::Resource*, std::list<AutoConnect>> resEvents;
+	std::unordered_map<fx::Resource*, std::list<AutoConnect>> resEvents2;
+
+	// a stack of nested resource activations
+	std::deque<fx::Resource*> resStack;
+
+	// a reference-counted list of nested stopwatches to stop
+	std::unordered_multiset<fx::Resource*> resSet;
+
+	// current resource stopwatches
+	tbb::concurrent_unordered_map<fx::Resource*, std::shared_ptr<Stopwatch>> resWatches;
+
+	std::chrono::microseconds scriptBeginTime{ 0 };
+
+	auto GetMetricFor(const fwRefContainer<fx::Resource>& resource)
+	{
+		std::unique_lock _(metricsMutex);
+		return metrics[resource->GetName()];
+	}
+
+	void RecalculateResourceDatas();
+};
+}
 
 inline std::chrono::microseconds usec()
 {
 	return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now().time_since_epoch());
 }
+
+struct Stopwatch
+{
+	void Start()
+	{
+		start = resume = usec();
+		total = self = std::chrono::microseconds{ 0 };
+	}
+
+	void Pause()
+	{
+		if (resume.count() == 0)
+		{
+			return;
+		}
+
+		auto now = usec();
+		self += now - resume;
+		resume = std::chrono::microseconds{ 0 };
+	}
+
+	void Resume()
+	{
+		if (resume.count() != 0)
+		{
+			return;
+		}
+
+		resume = usec();
+	}
+
+	void Stop()
+	{
+		if (start.count() == 0)
+		{
+			return;
+		}
+
+		auto now = usec();
+
+		if (resume.count() != 0)
+		{
+			self += now - resume;
+		}
+
+		total += now - start;
+		start = resume = std::chrono::microseconds{ 0 };
+	}
+
+	auto GetTotal() const
+	{
+		return total;
+	}
+
+	auto GetSelf() const
+	{
+		return self;
+	}
+
+private:
+	// the *total* between Start and Stop
+	std::chrono::microseconds total{ 0 };
+
+	// the total where this was not paused
+	std::chrono::microseconds self{ 0 };
+
+	// timer to indicate the last Resume call
+	std::chrono::microseconds resume{ 0 };
+
+	// timer to indicate the last Start call
+	std::chrono::microseconds start{ 0 };
+};
 
 static int64_t GetTotalBytes(const fwRefContainer<fx::Resource>& resource)
 {
@@ -97,15 +264,15 @@ static size_t GetStreamingUsageForThread(GtaThread* thread)
 }
 #endif
 
-static void RecalculateResourceDatas()
+void fx::ResourceMonitorImpl::RecalculateResourceDatas()
 {
-	g_resourceDatas.clear();
+	resourceDatas.clear();
 
-	auto avgScriptTime = g_scriptFrameMetrics.GetAverage();
-	g_avgScriptMs = (avgScriptTime.count() / 1000.0);
+	auto avgScriptTime = scriptFrameMetrics.GetAverage();
+	avgScriptMs = (avgScriptTime.count() / 1000.0);
 
-	auto avgFrameTime = g_gameFrameMetrics.GetAverage();
-	double g_avgFrameMs = (avgFrameTime.count() / 1000.0);
+	auto avgFrameTime = gameFrameMetrics.GetAverage();
+	avgFrameMs = (avgFrameTime.count() / 1000.0);
 
 	std::map<std::string, fwRefContainer<fx::Resource>> resourceList;
 
@@ -121,23 +288,27 @@ static void RecalculateResourceDatas()
 
 	for (const auto& [resourceName, resource] : resourceList)
 	{
-		auto metric = g_metrics.find(resourceName);
+		auto metric = metrics.find(resourceName);
 		double avgTickMs = -1.0;
+		double avgTotalMs = -1.0;
 		double avgFrameFraction = -1.0f;
 		int64_t memorySize = -1;
 		int64_t streamingSize = -1;
 
-		if (metric != g_metrics.end() && metric->second)
+		if (metric != metrics.end() && metric->second)
 		{
 			const auto& [key, valueRef] = *metric;
 			const auto& value = *valueRef;
 
-			auto avgTickTime = value.ticks.GetAverage();
+			auto avgTickTime = value.ticks->GetAverage();
 			avgTickMs = (avgTickTime.count() / 1000.0);
 
-			if (g_avgScriptMs != 0.0f)
+			auto avgTotalTime = value.totalTicks->GetAverage();
+			avgTotalMs = (avgTotalTime.count() / 1000.0);
+
+			if (avgScriptMs != 0.0f)
 			{
-				avgFrameFraction = (avgTickMs / g_avgScriptMs);
+				avgFrameFraction = (avgTickMs / avgScriptMs);
 			}
 
 			if (value.memorySize != 0)
@@ -154,7 +325,7 @@ static void RecalculateResourceDatas()
 			}
 #endif
 
-			g_resourceDatas.emplace_back(resource->GetName(), avgTickMs, avgFrameFraction, memorySize, streamingSize, value.ticks);
+			resourceDatas.emplace_back(resource->GetName(), avgTickMs, avgFrameFraction, memorySize, streamingSize, value.ticks, avgTotalMs, value.totalTicks);
 		}
 	}
 }
@@ -163,25 +334,27 @@ namespace fx
 {
 	ResourceMonitor::ResourceMonitor()
 	{
+		m_implStorage = std::make_unique<ResourceMonitorImpl>();
+
 #ifdef GTA_FIVE
 		static auto frameBegin = usec();
 
-		OnBeginGameFrame.Connect([]()
+		GetImpl()->events.emplace_back(OnBeginGameFrame, [this]()
 		{
 			frameBegin = usec();
 		});
 
-		OnEndGameFrame.Connect([]()
+		GetImpl()->events.emplace_back(OnEndGameFrame, [this]()
 		{
 			auto now = usec();
 			auto frameTime = now - frameBegin;
 
-			g_gameFrameMetrics.Append(frameTime);
+			GetImpl()->gameFrameMetrics.Append(frameTime);
 		});
 
-		OnDeleteResourceThread.Connect([](rage::scrThread* thread)
+		GetImpl()->events.emplace_back(OnDeleteResourceThread, [this](rage::scrThread* thread)
 		{
-			for (auto& metric : g_metrics)
+			for (auto& metric : GetImpl()->metrics)
 			{
 				if (metric.second)
 				{
@@ -194,53 +367,200 @@ namespace fx
 		});
 #endif
 
-		fx::Resource::OnInitializeInstance.Connect([this](fx::Resource* resource)
-		{
-			resource->OnStart.Connect([resource]()
-			{
-				g_metrics[resource->GetName()] = ResourceMetrics{};
+		auto resourceManager = fx::ResourceManager::GetCurrent();
 
-				g_metrics[resource->GetName()]->ticks.Reset();
+		GetImpl()->events.emplace_back(
+		resourceManager->OnTick, [this, resourceManager]()
+		{
+			auto now = usec();
+				
+			resourceManager->ForAllResources([this, now](const fwRefContainer<fx::Resource>& resource)
+			{
+				auto& metricRef = GetImpl()->GetMetricFor(resource);
+					
+				if (metricRef)
+				{
+					auto& metric = *metricRef;
+
+					if (auto it = m_pendingMetrics.find(resource.GetRef()); it != m_pendingMetrics.end())
+					{
+						metric.ticks->Append(std::get<0>(it->second));
+						metric.totalTicks->Append(std::get<1>(it->second));
+
+						if ((now - metric.memoryLastFetched) > 500ms && m_shouldGetMemory)
+						{
+							int64_t totalBytes = GetTotalBytes(resource);
+
+							metric.memorySize = totalBytes;
+							metric.memoryLastFetched = now;
+						}
+					}
+					else
+					{
+						metric.ticks->Append(std::chrono::microseconds{ 0 });
+						metric.totalTicks->Append(std::chrono::microseconds{ 0 });
+					}
+				}
 			});
 
-#if __has_include(<scrThread.h>)
-			resource->OnActivate.Connect([resource]()
+			m_pendingMetrics.clear();
+		},
+		INT32_MAX);
+
+		auto setupResource = [this](fx::Resource* resource)
+		{
+			auto& resEvents = GetImpl()->resEvents[resource];
+			
 			{
-					g_metrics[resource->GetName()]->gtaThread = (GtaThread*)rage::scrEngine::GetActiveThread();
+				auto& resEvents2 = GetImpl()->resEvents2[resource];
+
+				// we use an external defuser here so if OnRemove got used, we do not try to Disconnect on the dead resource when
+				// the AutoEvent is removed
+				auto defuser = std::make_shared<bool>(false);
+
+				resEvents2.emplace_back(defuser, resource->OnRemove, [this, resource, defuser]()
+				{
+					auto impl = GetImpl();
+
+					{
+						std::unique_lock _(impl->metricsMutex);
+						impl->metrics[resource->GetName()] = {};
+					}
+
+					impl->resEvents.erase(resource);
+					impl->resWatches[resource] = {};
+
+					*defuser = true;
+				});
+			}
+
+			auto processStart = [this, resource]()
+			{
+				auto impl = GetImpl();
+
+				auto m = std::make_shared<ResourceMetrics>(impl->tickIndex);
+				m->ticks->Reset();
+				m->totalTicks->Reset();
+
+				std::unique_lock _(impl->metricsMutex);
+				impl->metrics[resource->GetName()] = std::move(m);
+			};
+
+			resEvents.emplace_back(resource->OnStart, [processStart]()
+			{
+				processStart();
+			});
+
+			if (resource->GetState() == ResourceState::Started)
+			{
+				processStart();
+			}
+
+#if __has_include(<scrThread.h>)
+			resEvents.emplace_back(resource->OnActivate, [this, resource]()
+			{
+				auto impl = GetImpl();
+
+				if (auto metric = impl->GetMetricFor(resource))
+				{
+					metric->gtaThread = (GtaThread*)rage::scrEngine::GetActiveThread();
+				}
 			},
 			9999);
 #endif
 
-			resource->OnTick.Connect([resource]()
+			GetImpl()->resWatches[resource] = std::make_shared<Stopwatch>();
+
+			resEvents.emplace_back(resource->OnActivate, [this, resource]()
 			{
-				g_metrics[resource->GetName()]->tickStart = usec();
+				auto impl = GetImpl();
+
+				// pause the current top resource
+				if (!impl->resStack.empty())
+				{
+					auto topResource = impl->resStack.front();
+
+					if (auto watch = impl->resWatches[topResource])
+					{
+						watch->Pause();
+					}
+				}
+
+				// push this resource
+				impl->resStack.push_front(resource);
+
+				// check if it was already in, if not, start the stopwatch
+				if (impl->resSet.find(resource) == impl->resSet.end())
+				{
+					if (auto watch = impl->resWatches[resource])
+					{
+						watch->Start();
+					}
+				}
+				
+				impl->resSet.insert(resource);
 			},
 			-99999999);
 
-			resource->OnTick.Connect([this, resource]()
+			resEvents.emplace_back(resource->OnDeactivate, [this, resource]()
 			{
-				auto& metric = *g_metrics[resource->GetName()];
-				metric.ticks.Append(usec() - metric.tickStart);
+				auto impl = GetImpl();
 
-				if ((usec() - metric.memoryLastFetched) > 500ms && m_shouldGetMemory)
+				// broken? (double pop)
+				if (impl->resStack.empty())
 				{
-					int64_t totalBytes = GetTotalBytes(resource);
+					impl->resSet.clear();
+					return;
+				}
 
-					metric.memorySize = totalBytes;
-					metric.memoryLastFetched = usec();
+				// pop (this) resource
+				impl->resStack.pop_front();
+
+				// resume the last resource
+				if (!impl->resStack.empty())
+				{
+					auto topResource = impl->resStack.front();
+
+					if (auto watch = impl->resWatches[topResource])
+					{
+						watch->Resume();
+					}
+				}
+
+				// remove one of us from the set
+				if (auto it = impl->resSet.find(resource); it != impl->resSet.end())
+				{
+					impl->resSet.erase(it);
+				}
+
+				// if we're gone, stop and append
+				if (impl->resSet.find(resource) == impl->resSet.end())
+				{
+					if (auto watch = impl->resWatches[resource])
+					{
+						watch->Stop();
+
+						auto& pending = m_pendingMetrics[resource];
+						std::get<0>(pending) += watch->GetSelf();
+						std::get<1>(pending) += watch->GetTotal();
+					}
 				}
 			},
 			99999999);
 
-			resource->OnStop.Connect([resource]()
+			resEvents.emplace_back(resource->OnStop, [this, resource]()
 			{
-				g_metrics[resource->GetName()] = {};
+				auto impl = GetImpl();
+
+				std::unique_lock _(impl->metricsMutex);
+				impl->metrics[resource->GetName()] = {};
 			});
 
 #if __has_include(<scrThread.h>) && __has_include(<ResourceGameLifeTimeEvents.h>)
-			resource->GetComponent<fx::ResourceGameLifetimeEvents>()->OnBeforeGameShutdown.Connect([resource]()
+			resEvents.emplace_back(
+			resource->GetComponent<fx::ResourceGameLifetimeEvents>()->OnBeforeGameShutdown, [this, resource]()
 			{
-				auto m = g_metrics[resource->GetName()];
+				auto m = GetImpl()->GetMetricFor(resource);
 
 				if (m)
 				{
@@ -249,9 +569,10 @@ namespace fx
 			},
 			-50);
 
-			resource->GetComponent<fx::ResourceGameLifetimeEvents>()->OnGameDisconnect.Connect([resource]()
+			resEvents.emplace_back(
+			resource->GetComponent<fx::ResourceGameLifetimeEvents>()->OnGameDisconnect, [this, resource]()
 			{
-				auto m = g_metrics[resource->GetName()];
+				auto m = GetImpl()->GetMetricFor(resource);
 
 				if (m)
 				{
@@ -260,91 +581,92 @@ namespace fx
 			},
 			-50);
 #endif
+		};
+
+		GetImpl()->events.emplace_back(fx::Resource::OnInitializeInstance, [setupResource](fx::Resource* resource)
+		{
+			setupResource(resource);
 		});
 
-		fx::ResourceManager::OnInitializeInstance.Connect([](fx::ResourceManager* manager)
+		resourceManager->ForAllResources([&setupResource](const fwRefContainer<fx::Resource>& resource)
 		{
-			static std::chrono::microseconds scriptBeginTime;
+			setupResource(resource.GetRef());
+		});
 
-			manager->OnTick.Connect([]()
+		GetImpl()->events.emplace_back(resourceManager->OnTick, [this]()
+		{
+			(*(GetImpl()->tickIndex))++;
+			GetImpl()->scriptBeginTime = usec();
+		},
+		INT32_MIN);
+
+		GetImpl()->events.emplace_back(resourceManager->OnTick, [this]()
+		{
+			auto scriptEndTime = usec() - GetImpl()->scriptBeginTime;
+			GetImpl()->scriptFrameMetrics.Append(scriptEndTime);
+
+			GetImpl()->shouldRecalculateDatas = true;
+		},
+		INT32_MAX);
+
+		GetImpl()->events.emplace_back(resourceManager->OnTick, [this]()
+		{
+			bool showWarning = false;
+			std::string warningText;
+
+			for (const auto& [key, metricRef] : GetImpl()->metrics)
 			{
-				scriptBeginTime = usec();
-			},
-			INT32_MIN);
-
-			manager->OnTick.Connect([]()
-			{
-				auto scriptEndTime = usec() - scriptBeginTime;
-				g_scriptFrameMetrics.Append(scriptEndTime);
-
-				g_shouldRecalculateDatas = true;
-			},
-			INT32_MAX);
-
-			manager->OnTick.Connect([]()
-			{
-				bool showWarning = false;
-				std::string warningText;
-
-				for (const auto& [key, metricRef] : g_metrics)
+				if (!metricRef)
 				{
-					if (!metricRef)
-					{
-						continue;
-					}
-
-					auto& metric = *metricRef;
-					auto avgTickTime = metric.ticks.GetAverage();
-
-					if (avgTickTime > 6ms)
-					{
-						float fpsCount = (60 - (1000.f / (16.67f + (avgTickTime.count() / 1000.0))));
-
-						showWarning = true;
-						warningText += fmt::sprintf("%s is taking %.2f ms (or -%.1f FPS @ 60 Hz)\n", key, avgTickTime.count() / 1000.0, fpsCount);
-					}
+					continue;
 				}
 
-				if (showWarning)
+				auto& metric = *metricRef;
+				auto avgTickTime = metric.ticks->GetAverage();
+
+				if (avgTickTime > 6ms)
 				{
-					OnWarning(warningText);
+					float fpsCount = (60 - (1000.f / (16.67f + (avgTickTime.count() / 1000.0))));
+
+					showWarning = true;
+					warningText += fmt::sprintf("%s is taking %.2f ms (or -%.1f FPS @ 60 Hz)\n", key, avgTickTime.count() / 1000.0, fpsCount);
 				}
-				else
-				{
-					OnWarningGone();
-				}
-			});
+			}
+
+			if (showWarning)
+			{
+				OnWarning(warningText);
+			}
+			else
+			{
+				OnWarningGone();
+			}
 		});
 	}
 
 	ResourceMonitor::ResourceDatas& ResourceMonitor::GetResourceDatas()
 	{
-		if (g_shouldRecalculateDatas)
+		if (GetImpl()->shouldRecalculateDatas)
 		{
-			RecalculateResourceDatas();
+			GetImpl()->RecalculateResourceDatas();
 		}
 
-		return g_resourceDatas;
+		return GetImpl()->resourceDatas;
 	}
 
 	double ResourceMonitor::GetAvgScriptMs()
 	{
-		return g_avgScriptMs;
+		return GetImpl()->avgScriptMs;
 	}
 
 	double ResourceMonitor::GetAvgFrameMs()
 	{
-		return g_avgFrameMs;
+		return GetImpl()->avgFrameMs;
 	}
 
-	ResourceMonitor* ResourceMonitor::GetCurrent()
+	ResourceMonitorImpl* ResourceMonitor::GetImpl()
 	{
-		if (!g_globalResourceMonitor)
-		{
-			g_globalResourceMonitor = new ResourceMonitor();
-		}
-
-		return g_globalResourceMonitor;
+		return static_cast<ResourceMonitorImpl*>(m_implStorage.get());
 	}
 
 	fwEvent<const std::string&> ResourceMonitor::OnWarning;

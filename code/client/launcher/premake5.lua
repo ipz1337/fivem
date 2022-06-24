@@ -1,3 +1,43 @@
+local delayDLLs = {
+}
+
+if os.istarget('windows') then
+	delayDLLs = {
+		"d3d11.dll",
+		"d2d1.dll",
+		"d3dcompiler_47.dll",
+		"dwrite.dll",
+		"ole32.dll",
+		"shcore.dll",
+		"api-ms-win-core-winrt-error-l1-1-1.dll",
+		"api-ms-win-core-winrt-l1-1-0.dll",
+		"api-ms-win-core-winrt-error-l1-1-0.dll",
+		"api-ms-win-core-winrt-string-l1-1-0.dll",
+		"api-ms-win-shcore-stream-winrt-l1-1-0.dll",
+		"version.dll",
+		"dwmapi.dll",
+		"bcrypt.dll",
+		"wininet.dll",
+		"rpcrt4.dll",
+		"winmm.dll",
+		"dbghelp.dll",
+		"shlwapi.dll",
+		"ws2_32.dll",
+	}
+end
+
+do
+	local delayList = ""
+
+	for _, v in ipairs(delayDLLs) do
+		delayList = delayList .. ("L\"%s\",\n"):format(v)
+	end
+
+	if io.readfile('DelayList.h') ~= delayList then
+		io.writefile('DelayList.h', delayList)
+	end
+end
+
 -- is updater?
 local function isLauncherPersonality(name)
 	return name == 'main'
@@ -13,7 +53,7 @@ local function isGamePersonality(name)
 		return true
 	end
 
-	if name == 'game_1604' or name == 'game_2060' or name == 'game_372' or name == 'game_2189' or name == 'game_2372' then
+	if name == 'game_1604' or name == 'game_2060' or name == 'game_372' or name == 'game_2189' or name == 'game_2372' or name == 'game_2545' or name == 'game_2612' then
 		return true
 	end
 	
@@ -52,6 +92,10 @@ local function launcherpersonality_inner(name, aslr)
 		
 		defines("LAUNCHER_PERSONALITY_" .. name:upper())
 
+		if name:match('^game_') then
+			defines "LAUNCHER_PERSONALITY_ANY_GAME"
+		end
+
 		flags { "NoManifest", "NoImportLib" }
 		
 		symbols "Full"
@@ -86,57 +130,58 @@ local function launcherpersonality_inner(name, aslr)
 				"Installer.cpp",
 				"Updater.cpp",
 				"UpdaterUI.cpp",
+				"MiniDump.cpp",
+				"Minidump.Symbolication.cpp",
 			}
 		end
 		
 		if isGamePersonality(name) then
+			local gameBuild
+			local gameDump
+
 			if _OPTIONS['game'] == 'five' then
-				local gameBuild = '1604'
-				
+				gameBuild = '1604'
+
+				if name == 'game_2612' then gameBuild = '2612_1' end
+				if name == 'game_2545' then gameBuild = '2545_0' end
 				if name == 'game_2372' then gameBuild = '2372_0' end
 				if name == 'game_2189' then gameBuild = '2189_0' end
 				if name == 'game_2060' then gameBuild = '2060_2' end
 				if name == 'game_372' then gameBuild = '372' end
 
-				local gameDump = ("C:\\f\\GTA5_%s_dump.exe"):format(gameBuild)
+				gameDump = ("C:\\f\\GTA5_%s_dump.exe"):format(gameBuild)
+			elseif _OPTIONS['game'] == 'rdr3' then
+				gameBuild = '1311'
 
-				if name == 'game_mtl' then
-					gameDump = "C:\\f\\Launcher.exe"
-					gameBuild = 'mtl'
-				end
-			
+				if name == 'game_1355' then gameBuild = '1355_18' end
+				if name == 'game_1436' then gameBuild = '1436_28' end
+
+				gameDump = ("C:\\f\\RDR2_%s.exe"):format(gameBuild)
+			end
+
+			if name == 'game_mtl' then
+				gameDump = "C:\\f\\Launcher.exe"
+				gameBuild = 'mtl'
+			end
+
+			if gameDump then
 				postbuildcommands {
 					("if exist %s ( %%{cfg.buildtarget.directory}\\retarget_pe \"%%{cfg.buildtarget.abspath}\" %s )"):format(
 						gameDump, gameDump
-					),
+					)
+				}
+			end
+
+			if gameBuild then
+				postbuildcommands {
 					("if exist \"%s\" ( %%{cfg.buildtarget.directory}\\pe_debug \"%%{cfg.buildtarget.abspath}\" \"%s\" )"):format(
 						path.getabsolute(('../../tools/dbg/dump_%s.txt'):format(gameBuild)),
 						path.getabsolute(('../../tools/dbg/dump_%s.txt'):format(gameBuild))
 					)
 				}
-
-				resign()
-			elseif _OPTIONS['game'] == 'rdr3' then
-				local gameBuild = '1311'
-				
-				if name == 'game_1355' then gameBuild = '1355_18' end
-				if name == 'game_1436' then gameBuild = '1436_26' end
-
-				local gameDump = ("C:\\f\\RDR2_%s.exe"):format(gameBuild)
-
-				if name == 'game_mtl' then
-					gameDump = "C:\\f\\Launcher.exe"
-					gameBuild = 'mtl'
-				end
-			
-				postbuildcommands {
-					("if exist %s ( %%{cfg.buildtarget.directory}\\retarget_pe \"%%{cfg.buildtarget.abspath}\" %s )"):format(
-						gameDump, gameDump
-					),
-				}
-
-				resign()
 			end
+
+			resign()
 		end
 		
 		filter {}
@@ -155,7 +200,7 @@ local function launcherpersonality_inner(name, aslr)
 		if isLauncherPersonality(name) then
 			staticruntime 'On'
 			links "SharedLibc"
-			add_dependencies { 'vendor:xz-crt', 'vendor:minizip-crt', 'vendor:tbb-crt', 'vendor:boost_locale-crt', 'vendor:breakpad-crt' }
+			add_dependencies { 'vendor:xz-crt', 'vendor:zstd-crt', 'vendor:minizip-crt', 'vendor:tbb-crt', 'vendor:boost_locale-crt', 'vendor:breakpad-crt' }
 			add_dependencies { 'vendor:curl-crt', 'vendor:cpr-crt', 'vendor:mbedtls_crt', 'vendor:hdiffpatch-crt', 'vendor:openssl_crypto_crt' }
 		else
 			links "Shared"
@@ -183,20 +228,23 @@ local function launcherpersonality_inner(name, aslr)
 		linkoptions "/IGNORE:4254 /LARGEADDRESSAWARE" -- 4254 is the section type warning we tend to get
 		
 		if isGamePersonality(name) then
-			if not aslr and not isLauncherPersonality(name) then
-				linkoptions { "/SAFESEH:NO", "/DYNAMICBASE:NO" }
-			else
-				filter { "configurations:Debug" }
-					linkoptions { "/SAFESEH:NO", "/DYNAMICBASE:NO" }
-
-				filter {}
-			end
-
 			-- VS14 linker behavior change causes the usual workaround to no longer work, use an undocumented linker switch instead
 			-- note that pragma linker directives ignore these (among other juicy arguments like /WBRDDLL, /WBRDTESTENCRYPT and other
 			-- Microsoft Warbird-specific DRM functions... third-party vendors have to handle their own way of integrating
 			-- PE parsing and writing, yet Microsoft has their feature hidden in the exact linker those vendors use...)
 			linkoptions "/LAST:.zdata"
+
+			-- V8 requires a 1.5 MB stack at minimum (default is 1 MB stack space for V8 only, so 512 kB safety)
+			linkoptions "/STACK:0x180000"
+
+			if not aslr and not isLauncherPersonality(name) then
+				linkoptions { "/SAFESEH:NO", "/DYNAMICBASE:NO" }
+			else
+				filter { "configurations:Debug" }
+					linkoptions { "/SAFESEH:NO", "/DYNAMICBASE:NO" }
+			end
+
+			-- add NOTHING below here (`filter` from `isGamePersonality` would break, otherwise)
 		end
 		
 		-- reset isGamePersonality bit
@@ -207,7 +255,9 @@ local function launcherpersonality_inner(name, aslr)
 			linkoptions "/STACK:0x800000"
 		end
 			
-			linkoptions "/DELAYLOAD:d3d11.dll /DELAYLOAD:d2d1.dll /DELAYLOAD:d3dcompiler_47.dll /DELAYLOAD:dwrite.dll /DELAYLOAD:ole32.dll /DELAYLOAD:shcore.dll /DELAYLOAD:api-ms-win-core-winrt-error-l1-1-1.dll /DELAYLOAD:api-ms-win-core-winrt-l1-1-0.dll /DELAYLOAD:api-ms-win-core-winrt-error-l1-1-0.dll /DELAYLOAD:api-ms-win-core-winrt-string-l1-1-0.dll /DELAYLOAD:api-ms-win-shcore-stream-winrt-l1-1-0.dll"
+		for _, dll in ipairs(delayDLLs) do
+			linkoptions("/DELAYLOAD:" .. dll)
+		end
 
 	group ''
 end
@@ -229,6 +279,8 @@ if _OPTIONS['game'] == 'five' then
 	launcherpersonality 'game_2060'
 	launcherpersonality 'game_2189'
 	launcherpersonality 'game_2372'
+	launcherpersonality 'game_2545'
+	launcherpersonality 'game_2612'
 	launcherpersonality 'game_mtl'
 elseif _OPTIONS['game'] == 'rdr3' then
 	launcherpersonality 'game_1311'

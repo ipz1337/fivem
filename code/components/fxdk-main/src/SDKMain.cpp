@@ -388,16 +388,7 @@ void SdkMain()
 		}
 		else if (eventName == "sdk:getBuildNumber")
 		{
-			uint32_t buildNumber = 0;
-
-			std::wstring fpath = MakeRelativeCitPath(L"CitizenFX.ini");
-
-			if (GetFileAttributes(fpath.c_str()) != INVALID_FILE_ATTRIBUTES)
-			{
-				buildNumber = GetPrivateProfileInt(L"Game", L"SavedBuildNumber", buildNumber, fpath.c_str());
-			}
-
-			resman->GetComponent<ResourceEventManagerComponent>()->QueueEvent2("sdk:setBuildNumber", {}, buildNumber);
+			resman->GetComponent<ResourceEventManagerComponent>()->QueueEvent2("sdk:setBuildNumber", {}, xbr::GetGameBuild());
 		}
 		else if (eventName == "sdk:startFileWatcher")
 		{
@@ -468,7 +459,7 @@ void SdkMain()
 	settings.remote_debugging_port = 13173;
 	settings.log_severity = LOGSEVERITY_DEFAULT;
 
-	CefString(&settings.log_file).FromWString(MakeRelativeCitPath(L"cef.log"));
+	CefString(&settings.log_file).FromWString(MakeRelativeCitPath(L"cef_console.txt"));
 
 	CefString(&settings.browser_subprocess_path).FromWString(MakeCfxSubProcess(L"SDKBrowser", L"chrome"));
 

@@ -26,6 +26,7 @@
 #include <ppltasks.h>
 
 #include <CrossBuildRuntime.h>
+#include <PureModeState.h>
 #include <CoreConsole.h>
 
 #include <CfxLocale.h>
@@ -370,11 +371,9 @@ void NetLibrary::ProcessOOB(const NetAddress& from, const char* oob, size_t leng
 #if defined(GTA_FIVE) || defined(GTA_NY)
 				SetWindowText(CoreGetGameWindow(), va(
 #ifdef GTA_FIVE
-					L"FiveM"
-#elif defined(IS_RDR3)
-					L"RedM"
+					L"FiveM® by Cfx.re"
 #elif defined(GTA_NY)
-					L"LibertyM"
+					L"LibertyM™ by Cfx.re"
 #endif
 					L" - %s", ToWide(cleaned)));
 #endif
@@ -1275,7 +1274,7 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 								onesyncType = "onesync_medium";
 							}
 						}
-						else if (maxClients <= 1024)
+						else if (maxClients <= 2048)
 						{
 							onesyncType = "onesync_big";
 						}
@@ -1328,6 +1327,7 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 										auto oneSyncPolicyFailure = [this, onesyncType, maxClients, big1s]()
 										{
 											int maxSlots = 48;
+											std::string extraText;
 
 											if (policies.find("onesync") != policies.end())
 											{
@@ -1340,6 +1340,10 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 												{
 													maxSlots = 128;
 												}
+												else if (maxSlots >= 64 && maxClients > 64)
+												{
+													extraText = "\nUsing 128 slots with 'Element Club Aurum' requires you to enable OneSync 'on' (formerly named 'Infinity'), not 'legacy'. Check your server configuration.";
+												}
 											}
 											else
 											{
@@ -1351,16 +1355,17 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 
 											if (policies.find("onesync_big") != policies.end())
 											{
-												maxSlots = 1024;
+												maxSlots = 2048;
 											}
 
-											OnConnectionError(fmt::sprintf("This server uses more slots than allowed by policy. The allowed slot count is %d, but the server has a maximum slot count of %d.",
+											OnConnectionError(fmt::sprintf("This server uses more slots than allowed by the current subscription. The allowed slot count is %d, but the server has a maximum slot count of %d.%s",
 												maxSlots,
-												maxClients),
+												maxClients,
+												extraText),
 												json::object({
-													{ "fault", "either" },
+													{ "fault", "server" },
 													{ "status", true },
-													{ "action", "#ErrorAction_TryAgainCheckStatus" },
+													{ "action", "#ErrorAction_TryAgainContactOwner" },
 												}).dump());
 
 											m_connectionState = CS_IDLE;
@@ -1433,6 +1438,12 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 													{
 														// development/testing servers (<= 10 clients max - see ZAP defaults) get subdir_file_mapping granted
 														policies.insert("subdir_file_mapping");
+													}
+
+													// dev server
+													if (maxClients <= 8)
+													{
+														policies.insert("local_evaluation");
 													}
 
 													// format policy string and store it
@@ -1654,11 +1665,13 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 		}), handleCardResult);
 	};
 
+	static std::string requestSteamTicket = "on";
+
 	continueRequest = [=]()
 	{
 		auto steamComponent = GetSteam();
 
-		if (steamComponent)
+		if (steamComponent && requestSteamTicket == "on")
 		{
 			static uint32_t ticketLength;
 			static uint8_t ticketBuffer[4096];
@@ -1765,6 +1778,13 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 #if defined(GTA_FIVE) || defined(IS_RDR3)
 				if (info.is_object() && info["vars"].is_object())
 				{
+					int pureLevel = 0;
+
+					if (auto pureVal = info["vars"].value("sv_pureLevel", "0"); !pureVal.empty())
+					{
+						pureLevel = std::stoi(pureVal);
+					}
+
 					auto val = info["vars"].value("sv_enforceGameBuild", "");
 					int buildRef = 0;
 
@@ -1772,10 +1792,10 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 					{
 						buildRef = std::stoi(val);
 
-						if (buildRef != 0 && buildRef != xbr::GetGameBuild())
+						if ((buildRef != 0 && buildRef != xbr::GetGameBuild()) || (pureLevel != fx::client::GetPureLevel()))
 						{
 #if defined(GTA_FIVE)
-							if (buildRef != 1604 && buildRef != 2060 && buildRef != 2189 && buildRef != 2372)
+							if (buildRef != 1604 && buildRef != 2060 && buildRef != 2189 && buildRef != 2372 && buildRef != 2545 && buildRef != 2612)
 #else
 							if (buildRef != 1311 && buildRef != 1355 && buildRef != 1436)
 #endif
@@ -1789,7 +1809,7 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 								return;
 							}
 
-							OnRequestBuildSwitch(buildRef);
+							OnRequestBuildSwitch(buildRef, pureLevel);
 							m_connectionState = CS_IDLE;
 							return;
 						}
@@ -1798,7 +1818,7 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 #if defined(GTA_FIVE)
 					if (xbr::GetGameBuild() != 1604 && buildRef == 0)
 					{
-						OnRequestBuildSwitch(1604);
+						OnRequestBuildSwitch(1604, 0);
 						m_connectionState = CS_IDLE;
 						return;
 					}
@@ -1810,6 +1830,8 @@ concurrency::task<void> NetLibrary::ConnectToServer(const std::string& rootUrl)
 					{
 						licenseKeyToken = ival;
 					}
+
+					requestSteamTicket = info.value("requestSteamTicket", "on");
 				}
 #endif
 			}
@@ -1904,11 +1926,15 @@ void NetLibrary::Disconnect(const char* reason)
 		m_connectionState = CS_IDLE;
 		m_currentServer = NetAddress();
 
-		auto steam = GetSteam();
-
-		if (steam)
+		// we don't want to tell Steam to launch a new child as we're exiting
+		if (reason != std::string_view{ "Exiting" })
 		{
-			steam->SetRichPresenceValue(0, "");
+			auto steam = GetSteam();
+
+			if (steam)
+			{
+				steam->SetRichPresenceValue(0, "");
+			}
 		}
 	}
 }
@@ -1944,28 +1970,20 @@ bool NetLibrary::IsPendingInGameReconnect()
 	return (m_connectionState == CS_ACTIVE && m_impl->IsDisconnected());
 }
 
+static std::string g_steamPersonaName;
+
 const char* NetLibrary::GetPlayerName()
 {
-	if (!m_playerName.empty()) return m_playerName.c_str();
-
-	auto steamComponent = GetSteam();
-
-	if (steamComponent)
+	// if a higher-level component set a name, use that name instead
+	if (!m_playerName.empty())
 	{
-		IClientEngine* steamClient = steamComponent->GetPrivateClient();
+		return m_playerName.c_str();
+	}
 
-		if (steamClient)
-		{
-			InterfaceMapper steamFriends(steamClient->GetIClientFriends(steamComponent->GetHSteamUser(), steamComponent->GetHSteamPipe(), "CLIENTFRIENDS_INTERFACE_VERSION001"));
-
-			if (steamFriends.IsValid())
-			{
-				// TODO: name changing
-				static std::string personaName = steamFriends.Invoke<const char*>("GetPersonaName");
-
-				return personaName.c_str();
-			}
-		}
+	// do we have a Steam name?
+	if (!g_steamPersonaName.empty())
+	{
+		return g_steamPersonaName.c_str();
 	}
 
 	static std::wstring returnNameWide;
@@ -2104,6 +2122,25 @@ NetLibrary* NetLibrary::Create()
 			lib->Disconnect((const char*)reason);
 		}
 	});
+	
+	auto steamComponent = GetSteam();
+
+	if (steamComponent)
+	{
+		IClientEngine* steamClient = steamComponent->GetPrivateClient();
+
+		if (steamClient)
+		{
+			InterfaceMapper steamFriends(steamClient->GetIClientFriends(steamComponent->GetHSteamUser(), steamComponent->GetHSteamPipe(), "CLIENTFRIENDS_INTERFACE_VERSION001"));
+
+			if (steamFriends.IsValid())
+			{
+				g_steamPersonaName = steamFriends.Invoke<const char*>("GetPersonaName");
+			}
+		}
+	}
+
+	static ConVar<std::string> extNicknameVar("ui_extNickname", ConVar_ReadOnly, g_steamPersonaName);
 
 	return lib;
 }

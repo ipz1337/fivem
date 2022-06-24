@@ -18,16 +18,13 @@
 #include <HostSharedData.h>
 #include <CrossBuildRuntime.h>
 
+#include <ROSSuffix.h>
+
 #include <Error.h>
 
 struct LauncherState
 {
-	volatile DWORD pid;
-
-	LauncherState()
-		: pid(0)
-	{
-	}
+	volatile DWORD pid = 0;
 };
 
 #ifdef GTA_FIVE
@@ -334,6 +331,8 @@ bool LoopbackTcpServerManager::Connect(SOCKET s, const sockaddr* name, int namel
 
 				TriggerSocketEvent(s, FD_CONNECT);
 				TriggerSocketEvent(s, FD_WRITE);
+
+				WSASetLastError(WSAEWOULDBLOCK);
 
 				return true;
 			}
@@ -1006,7 +1005,8 @@ static int __stdcall EP_GetAddrInfo(const char* name, const char* serviceName, c
 {
 	int outValue;
 
-	if (!ShouldBeHooked(_ReturnAddress()) || !g_manager->GetAddrInfoA(name, serviceName, hints, result, &outValue))
+	// we aren't doing a ShouldBeHooked check here, since this will be used for e.g. `ros.citizenfx.internal` which we *do* want to hook
+	if (!g_manager->GetAddrInfoA(name, serviceName, hints, result, &outValue))
 	{
 		return g_oldGetAddrInfo(name, serviceName, hints, result);
 	}
@@ -1194,19 +1194,13 @@ static BOOL __stdcall EP_CreateProcessW(const wchar_t* applicationName, wchar_t*
 	bool isSubprocess = wcsstr(commandLine, L"subprocess.exe") || StrStrIW(commandLine, L"SocialClubHelper.exe");
 	bool isService = wcsstr(commandLine, L"RockstarService.exe");
 
-	if (/*socialClubLib && */applicationName || isSubprocess)
+	if (applicationName || isSubprocess || isService)
 	{
-		/*wchar_t rosFolder[MAX_PATH];
-		GetModuleFileName(socialClubLib, rosFolder, _countof(rosFolder));
-
-		wcsrchr(rosFolder, L'\\')[1] = L'\0';
-		wcscat(rosFolder, L"subprocess.exe");*/
-
-		//if (boost::filesystem::equivalent(rosFolder, applicationName))
 		if (isSubprocess ||
-			boost::filesystem::path(applicationName).filename() == "subprocess.exe" ||
-			boost::filesystem::path(applicationName).filename() == "SocialClubHelper.exe" ||
-			boost::filesystem::path(applicationName).filename() == "socialclubhelper.exe")
+			(applicationName && (
+				boost::filesystem::path(applicationName).filename() == "subprocess.exe" ||
+				boost::filesystem::path(applicationName).filename() == "SocialClubHelper.exe" ||
+				boost::filesystem::path(applicationName).filename() == "socialclubhelper.exe")))
 		{
 			HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, g_rosParentPid);
 
@@ -1218,73 +1212,10 @@ static BOOL __stdcall EP_CreateProcessW(const wchar_t* applicationName, wchar_t*
 			SubprocessPipe(commandLine);
 
 			return TRUE;
-
-            // don't create any more subprocesses if this is the case :/
-            if (g_subProcessHandles.size() == 42)
-            {
-                HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, g_rosParentPid);
-
-                information->dwProcessId = g_rosParentPid;
-                information->dwThreadId = 0;
-                information->hProcess = hProcess;
-                information->hThread = INVALID_HANDLE_VALUE;
-
-                return TRUE;
-            }
-
-			BOOL retval;
-
-			// parse the existing environment block
-			EnvironmentMap environmentMap;
-
-			{
-				wchar_t* environmentStrings = GetEnvironmentStrings();
-
-				ParseEnvironmentBlock(environmentStrings, environmentMap);
-
-				FreeEnvironmentStrings(environmentStrings);
-			}
-
-			// insert tool mode value
-			environmentMap[L"CitizenFX_ToolMode"] = L"1";
-
-			// output the environment into a new block
-			std::vector<wchar_t> newEnvironment;
-
-			BuildEnvironmentBlock(environmentMap, newEnvironment);
-
-			// not as safe as recreating the environment block, but easier
-			//SetEnvironmentVariable(L"CitizenFX_ToolMode", L"1");
-
-			auto fxApplicationName = MakeCfxSubProcess(L"ROSSubProcess");
-
-			// set the command line
-			const wchar_t* newCommandLine = va(L"\"%s\" ros:subprocess %s --remote-debugging-port=13171 --ignore-certificate-errors", fxApplicationName, commandLine);
-
-			// and go create the new fake process
-			retval = g_oldCreateProcessW(fxApplicationName, const_cast<wchar_t*>(newCommandLine), processAttributes, threadAttributes, inheritHandles, creationFlags | CREATE_UNICODE_ENVIRONMENT, &newEnvironment[0], currentDirectory, startupInfo, information);
-
-			if (!retval)
-			{
-				auto error = GetLastError();
-
-				trace("Creating subprocess failed - %d\n", error);
-			}
-			else
-			{
-				trace("Got ROS subprocess - pid %d\n", information->dwProcessId);
-
-				g_subProcessHandles.push_back(information->dwProcessId);
-			}
-
-			// unset the environment variable
-			//SetEnvironmentVariable(L"CitizenFX_ToolMode", L"0");
-
-			return retval;
 		}
 
 		if (isService ||
-			boost::filesystem::path(applicationName).filename() == "RockstarService.exe")
+			(applicationName && boost::filesystem::path(applicationName).filename() == "RockstarService.exe"))
 		{
 			auto mutex = OpenMutexW(SYNCHRONIZE, FALSE, va(L"Cfx_ROSServiceMutex_%s", ToWide(launch::GetLaunchModeKey())));
 
@@ -1318,10 +1249,10 @@ static BOOL __stdcall EP_CreateProcessW(const wchar_t* applicationName, wchar_t*
 			auto fxApplicationName = MakeCfxSubProcess(L"ROSService", L"game_mtl");
 
 			// set the command line
-			const wchar_t* newCommandLine = va(L"\"%s\" ros:service", fxApplicationName, commandLine);
+			const wchar_t* newCommandLine = va(L"\"%s\" ros:service", fxApplicationName);
 
 			// and go create the new fake process
-			retval = g_oldCreateProcessW(fxApplicationName, const_cast<wchar_t*>(newCommandLine), processAttributes, threadAttributes, inheritHandles, creationFlags & (~CREATE_SUSPENDED) | CREATE_UNICODE_ENVIRONMENT, &newEnvironment[0], currentDirectory, startupInfo, information);
+			retval = g_oldCreateProcessW(fxApplicationName, const_cast<wchar_t*>(newCommandLine), processAttributes, threadAttributes, inheritHandles, (creationFlags | CREATE_UNICODE_ENVIRONMENT) & ~CREATE_SUSPENDED, &newEnvironment[0], MakeRelativeCitPath(L"data\\game-storage\\launcher").c_str(), startupInfo, information);
 
 			if (!retval)
 			{
@@ -1333,6 +1264,11 @@ static BOOL __stdcall EP_CreateProcessW(const wchar_t* applicationName, wchar_t*
 			{
 				trace("Got ROS service - pid %d\n", information->dwProcessId);
 			}
+
+			static HostSharedData<LauncherState> hsd("CFX_ServicePid");
+			hsd->pid = information->dwProcessId;
+
+			SetPriorityClass(information->hProcess, ABOVE_NORMAL_PRIORITY_CLASS);
 
 			information->hThread = NULL;
 			information->hProcess = CreateEventW(NULL, TRUE, FALSE, va(L"Cfx_ROSServiceEvent_%s", ToWide(launch::GetLaunchModeKey())));
@@ -1355,15 +1291,6 @@ static BOOL __stdcall EP_CreateProcessW(const wchar_t* applicationName, wchar_t*
 				CloseHandle(hEvent);
 			}
 
-			/*for (auto& subProcess : g_subProcessHandles)
-			{
-				HANDLE hSub = OpenProcess(PROCESS_TERMINATE, FALSE, subProcess);
-				TerminateProcess(hSub, 42);
-				CloseHandle(hSub);
-
-                g_subProcessHandles.resize(42);
-			}*/
-
 			HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, g_rosParentPid);
 
 			if (GetFileAttributes(MakeRelativeCitPath(L"permalauncher").c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -1375,6 +1302,8 @@ static BOOL __stdcall EP_CreateProcessW(const wchar_t* applicationName, wchar_t*
 
 				hProcess = GetCurrentProcess();
 			}
+
+			SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
 
 			// disable D3D present function
 			// TODO for MTL
@@ -1412,11 +1341,97 @@ void WaitForLauncher()
 
 extern void SetCanSafelySkipLauncher(bool value);
 
-static void SetLauncherWaitCB(HANDLE hEvent, HANDLE hProcess, BOOL doBreak, DWORD timeout = INFINITE)
+extern "C" DLL_EXPORT DWORD WINAPI ROSFailure(LPVOID)
 {
+	FatalError("Timed out while waiting for the Rockstar Games Launcher (ROS/MTL).\nPlease check your system for third-party software (antivirus, etc.) that might be interfering with the 'embedded' RGL launching the game.\n\nIf asking for support, please save and upload the log file from the 'Save information' button.\n\nAgain, please save and UPLOAD the log file from the 'Save information' button to https://forum.cfx.re/t/2009848 and provide as much information as possible (how often you get this, any installed antivirus or overlays, and so on).");
+	return 0;
+}
+
+static const void* GetRemoteProcAddress(HANDLE hProcess, const void* function)
+{
+	HMODULE localModule = nullptr;
+	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)function, &localModule);
+
+	if (localModule)
+	{
+		uintptr_t rva = reinterpret_cast<uintptr_t>(function) - reinterpret_cast<uintptr_t>(localModule);
+
+		const wchar_t* baseName = nullptr;
+
+		{
+			wchar_t moduleName[MAX_PATH * 2];
+			GetModuleFileNameW(localModule, moduleName, std::size(moduleName));
+
+			baseName = wcsrchr(moduleName, L'\\') + 1;
+		}
+
+		DWORD processLen = 0;
+		if (EnumProcessModules(hProcess, nullptr, 0, &processLen))
+		{
+			std::vector<HMODULE> buffer(processLen / sizeof(HMODULE));
+
+			if (EnumProcessModules(hProcess, buffer.data(), buffer.size() * sizeof(HMODULE), &processLen))
+			{
+				for (HMODULE module : buffer)
+				{
+					wchar_t remoteModuleName[MAX_PATH * 2];
+
+					if (GetModuleFileNameExW(hProcess, module, remoteModuleName, std::size(remoteModuleName)))
+					{
+						const wchar_t* remoteBaseName = wcsrchr(remoteModuleName, L'\\') + 1;
+
+						if (wcsicmp(baseName, remoteBaseName) == 0)
+						{
+							return reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(module) + rva);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+void BackOffMtl()
+{
+	SetCanSafelySkipLauncher(false);
+
+	auto backOffSuffix = fmt::sprintf(L"%d", GetTickCount64());
+
+	auto backOffFile = [backOffSuffix](const std::wstring& fileName)
+	{
+		MoveFileW(MakeRelativeCitPath(fileName).c_str(), MakeRelativeCitPath(fileName + L".old" + backOffSuffix).c_str());
+	};
+
+	backOffFile(L"data\\game-storage\\ros_documents" ROS_SUFFIX_W);
+	backOffFile(L"data\\game-storage\\ros_launcher_appdata" ROS_SUFFIX_W);
+	backOffFile(L"data\\game-storage\\ros_launcher_data" ROS_SUFFIX_W);
+	backOffFile(L"data\\game-storage\\ros_launcher_documents" ROS_SUFFIX_W);
+	backOffFile(L"data\\game-storage\\ros_launcher_game" ROS_SUFFIX_W);
+	backOffFile(L"data\\game-storage\\ros_profiles");
+}
+
+void RunLauncher(const wchar_t* toolName, bool instantWait);
+
+static void SetLauncherWaitCB(HANDLE hEvent, HANDLE hProcessIn, BOOL doBreak, DWORD timeout = INFINITE)
+{
+	static bool inWait = false;
+	static HANDLE hProcess;
+
+	hProcess = hProcessIn;
+
+	if (inWait)
+	{
+		return;
+	}
+
 	g_waitForLauncherCB = [=]()
 	{
+		inWait = true;
+
 		bool done = false;
+		static int retries = 1;
 		static uint64_t startTime = GetTickCount64();
 		uint64_t endTime = GetTickCount64() + timeout;
 
@@ -1444,34 +1459,37 @@ static void SetLauncherWaitCB(HANDLE hEvent, HANDLE hProcess, BOOL doBreak, DWOR
 				{
 					auto waitedFor = (GetTickCount64() - startTime) / 1000;
 
-					if (waitedFor > 90)
+					if (waitedFor >= 45)
 					{
-						SetCanSafelySkipLauncher(false);
-
-						auto backOffSuffix = fmt::sprintf(L"%d", GetTickCount64());
-						
-						auto backOffFile = [backOffSuffix](const std::wstring& fileName)
+						if (retries >= 3)
 						{
-							MoveFileW(MakeRelativeCitPath(fileName).c_str(), MakeRelativeCitPath(fileName + L".old" + backOffSuffix).c_str());
-						};
+							BackOffMtl();
 
-						backOffFile(L"data\\game-storage\\ros_documents");
-						backOffFile(L"data\\game-storage\\ros_launcher_appdata3");
-						backOffFile(L"data\\game-storage\\ros_launcher_data3");
-						backOffFile(L"data\\game-storage\\ros_launcher_documents2");
-						backOffFile(L"data\\game-storage\\ros_launcher_game2");
-						backOffFile(L"data\\game-storage\\ros_profiles");
+							auto threadStart = GetRemoteProcAddress(hProcess, &ROSFailure);
 
-						FatalError("Timed out while waiting for ROS/MTL to clear launch. Please check your system for third-party software (antivirus, etc.) that might be interfering with ROS.\nIf asking for support, please save and upload the log file from the 'Save information' button.\n\nAgain, please save and UPLOAD the log file from the 'Save information' button to https://forum.cfx.re/t/2009848 or anywhere you're asking for help!");
-					}
+							DWORD tid;
+							CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)threadStart, NULL, 0, &tid);
 
-					// lucky hang tracing
-					if (waitedFor > 30)
-					{
-						DWORD tid;
-						CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "DebugBreak"), NULL, 0, &tid);
+							WaitForSingleObject(GetCurrentProcess(), 30000);
 
-						WaitForSingleObject(GetCurrentProcess(), 30000);
+							__debugbreak();
+						}
+
+						++retries;
+						trace("^3Retrying ROS launch (attempt %d/%d)\n", retries, 3);
+
+						HostSharedData<LauncherState> hsd("CFX_ServicePid");
+
+						auto service = OpenProcess(PROCESS_TERMINATE, FALSE, hsd->pid);
+						TerminateProcess(service, 0);
+						TerminateProcess(hProcess, 0);
+
+						Sleep(1500);
+
+						startTime = GetTickCount64();
+						RunLauncher(L"ros:launcher", false);
+
+						continue;
 					}
 
 					trace("^3ROS/MTL still hasn't cleared launch (waited %d seconds) - if this ends up timing out, please solve this!\n", waitedFor);
@@ -1487,6 +1505,8 @@ static void SetLauncherWaitCB(HANDLE hEvent, HANDLE hProcess, BOOL doBreak, DWOR
 				}
 			}
 		}
+
+		inWait = false;
 	};
 }
 
@@ -1511,7 +1531,7 @@ void RunLauncherAwait()
 		}
 	}
 
-	HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, launcherState->pid);
+	HANDLE hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, launcherState->pid);
 
 	SetLauncherWaitCB(hEvent, hProcess, TRUE);
 }
@@ -1576,9 +1596,11 @@ void RunLauncher(const wchar_t* toolName, bool instantWait)
 	HANDLE hEvent = CreateEvent(nullptr, TRUE, FALSE, va(L"CitizenFX_GTA5_ClearedForLaunch%s", eventName));
 
 	// and go create the new fake process
+	auto isLauncher = (wcsstr(toolName, L"ros:launcher") != nullptr);
+
 	PROCESS_INFORMATION pi;
 	STARTUPINFO si = { sizeof(STARTUPINFO) };
-	BOOL retval = g_oldCreateProcessW(fxApplicationName, const_cast<wchar_t*>(newCommandLine), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, &newEnvironment[0], MakeRelativeCitPath(L"").c_str(), &si, &pi);
+	BOOL retval = g_oldCreateProcessW(fxApplicationName, const_cast<wchar_t*>(newCommandLine), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, &newEnvironment[0], MakeRelativeCitPath(L"data\\game-storage\\launcher").c_str(), &si, &pi);
 
 	if (!retval)
 	{
@@ -1590,9 +1612,7 @@ void RunLauncher(const wchar_t* toolName, bool instantWait)
 	{
 		trace("Got %s process - pid %d\n", ToNarrow(toolName), pi.dwProcessId);
 
-		auto doBreak = (wcsstr(toolName, L"ros:launcher") != nullptr);
-
-		if (doBreak)
+		if (isLauncher)
 		{
 			launcherState->pid = pi.dwProcessId;
 		}
@@ -1604,7 +1624,9 @@ void RunLauncher(const wchar_t* toolName, bool instantWait)
 			timeout = 30000;
 		}
 
-		SetLauncherWaitCB(hEvent, pi.hProcess, doBreak, timeout);
+		SetPriorityClass(pi.hProcess, ABOVE_NORMAL_PRIORITY_CLASS);
+
+		SetLauncherWaitCB(hEvent, pi.hProcess, isLauncher, timeout);
 
         if (instantWait)
         {
@@ -1842,7 +1864,14 @@ void OnPreInitHook()
 		DO_HOOK_NO_ASSERT(L"kernel32.dll", "CallbackMayRunLong", EP_CallbackMayRunLong, g_oldCallbackMayRunLong);
 	}
 
-	DO_HOOK(L"kernel32.dll", "CreateProcessW", EP_CreateProcessW, g_oldCreateProcessW);
+	if (!CfxIsWine())
+	{
+		DO_HOOK(L"kernel32.dll", "CreateProcessW", EP_CreateProcessW, g_oldCreateProcessW);
+	}
+	else
+	{
+		DO_HOOK(L"kernelbase.dll", "CreateProcessW", EP_CreateProcessW, g_oldCreateProcessW);
+	}
 
 	if (getenv("CitizenFX_ToolMode") && !strstr(GetCommandLineA(), "ros:launcher")) // hacky...
 	{

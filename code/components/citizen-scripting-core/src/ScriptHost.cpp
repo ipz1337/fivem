@@ -29,6 +29,166 @@
 
 #include <sstream>
 
+inline std::chrono::microseconds usec()
+{
+	return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now().time_since_epoch());
+}
+
+struct Bookmark
+{
+	fx::Resource* resource;
+	std::chrono::microseconds deadline;
+	IScriptTickRuntimeWithBookmarks* scRT;
+	uint64_t bookmark;
+
+	inline Bookmark(IScriptTickRuntimeWithBookmarks* scRT, std::nullptr_t)
+		: resource(nullptr), deadline(0), scRT(scRT), bookmark(0)
+	{
+		
+	}
+
+	inline Bookmark(fx::Resource* resource,
+					std::chrono::microseconds deadline,
+					IScriptTickRuntimeWithBookmarks * scRT,
+					uint64_t bookmark)
+		: resource(resource), deadline(deadline), scRT(scRT), bookmark(bookmark)
+	{
+	
+	}
+};
+
+static struct  
+{
+	std::list<Bookmark> list;
+	std::list<IScriptTickRuntimeWithBookmarks*> removeList;
+
+	std::unordered_map<IScriptTickRuntimeWithBookmarks*, std::list<Bookmark>::iterator> resourceInsertionIterators;
+
+	bool executing = false;
+	std::list<Bookmark>::iterator* executingIt = nullptr;
+} bookmarkRefs;
+
+static void QueueBookmark(fx::Resource* resource, IScriptTickRuntimeWithBookmarks* scRT, uint64_t bookmark, std::chrono::microseconds deadline)
+{
+	auto refIt = bookmarkRefs.resourceInsertionIterators.find(scRT);
+	assert(refIt != bookmarkRefs.resourceInsertionIterators.end());
+	bookmarkRefs.list.insert(refIt->second, Bookmark{ resource, deadline, scRT, bookmark });
+}
+
+static void CreateBookmarks(IScriptTickRuntimeWithBookmarks* scRT)
+{
+	bookmarkRefs.resourceInsertionIterators.emplace(scRT, bookmarkRefs.list.insert(bookmarkRefs.list.end(), Bookmark{ scRT, nullptr }));
+}
+
+static void RemoveBookmarks(IScriptTickRuntimeWithBookmarks* scRT)
+{
+	auto exIt = (bookmarkRefs.executing) ? bookmarkRefs.executingIt : nullptr;
+
+	auto list = &bookmarkRefs.list;
+
+	{
+		for (auto it = list->begin(); it != list->end();)
+		{
+			if (it->scRT == scRT)
+			{
+				if (exIt && *exIt == it)
+				{
+					*exIt = it = list->erase(it);
+				}
+				else
+				{
+					it = list->erase(it);
+				}
+			}
+			else
+			{
+				++it;
+			}
+		}
+	}
+
+	bookmarkRefs.resourceInsertionIterators.erase(scRT);
+}
+
+static void RunBookmarks()
+{
+	bookmarkRefs.executing = true;
+
+	auto now = usec();
+
+	fx::Resource* lastResource = nullptr;
+	IScriptTickRuntimeWithBookmarks* lastScRT = nullptr;
+
+	std::vector<uint64_t> nextBookmarks;
+
+	auto deq = [&]()
+	{
+		if (nextBookmarks.size())
+		{
+			lastResource->Run([&]()
+			{
+				lastScRT->TickBookmarks(nextBookmarks.data(), nextBookmarks.size());
+			});
+
+			nextBookmarks.clear();
+		}
+	};
+
+	for (auto it = bookmarkRefs.list.begin(); it != bookmarkRefs.list.end();)
+	{
+		const auto& entry = *it;
+
+		if (entry.resource && entry.deadline <= now)
+		{
+			auto scRT = entry.scRT;
+
+			if (lastScRT != scRT)
+			{
+				auto saveIt = it;
+				bookmarkRefs.executingIt = &it;
+				deq();
+
+				bookmarkRefs.executingIt = nullptr;
+
+				// if deq() has been changing the executingIt, we should skip the next execution outright
+				// as it was a removed resource
+				if (it != saveIt)
+				{
+					lastScRT = nullptr;
+					lastResource = nullptr;
+					continue;
+				}
+
+				lastScRT = scRT;
+				lastResource = entry.resource;
+			}
+
+			nextBookmarks.push_back(entry.bookmark);
+
+			it = bookmarkRefs.list.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+
+	deq();
+
+	bookmarkRefs.executing = false;
+}
+
+static InitFunction initBMFunction([]()
+{
+	fx::ResourceManager::OnInitializeInstance.Connect([](fx::ResourceManager* self)
+	{
+		self->OnTick.Connect([]()
+		{
+			RunBookmarks();
+		});
+	});
+});
+
 #ifdef _WIN32
 #define SAFE_BUFFERS __declspec(safebuffers)
 #else
@@ -97,7 +257,7 @@ result_t StreamWrapper::GetLength(uint64_t *length)
 	return FX_S_OK;
 }
 
-class TestScriptHost : public OMClass<TestScriptHost, IScriptHost, IScriptHostWithResourceData, IScriptHostWithManifest>
+class TestScriptHost : public OMClass<TestScriptHost, IScriptHost, IScriptHostWithResourceData, IScriptHostWithManifest, IScriptHostWithBookmarks>
 {
 public:
 	NS_DECL_ISCRIPTHOST;
@@ -105,6 +265,8 @@ public:
 	NS_DECL_ISCRIPTHOSTWITHRESOURCEDATA;
 
 	NS_DECL_ISCRIPTHOSTWITHMANIFEST;
+
+	NS_DECL_ISCRIPTHOSTWITHBOOKMARKS;
 
 private:
 	Resource* m_resource;
@@ -318,6 +480,34 @@ result_t TestScriptHost::SubmitBoundaryEnd(char* boundaryData, int boundarySize)
 	return FX_S_OK;
 }
 
+result_t TestScriptHost::CreateBookmarks(IScriptTickRuntimeWithBookmarks* scRT)
+{
+	::CreateBookmarks(scRT);
+	return FX_S_OK;
+}
+
+result_t TestScriptHost::ScheduleBookmark(IScriptTickRuntimeWithBookmarks* scRT, uint64_t bookmark, int64_t deadline)
+{
+	auto newDeadline = std::chrono::microseconds{
+		deadline
+	};
+
+	if (deadline < 0)
+	{
+		newDeadline = usec() + std::chrono::milliseconds{ -deadline };
+	}
+
+	QueueBookmark(m_resource, scRT, bookmark, newDeadline);
+
+	return FX_S_OK;
+}
+
+result_t TestScriptHost::RemoveBookmarks(IScriptTickRuntimeWithBookmarks* scRT)
+{
+	::RemoveBookmarks(scRT);
+	return FX_S_OK;
+}
+
 // TODO: don't ship with this in
 OMPtr<IScriptHost> GetScriptHostForResource(Resource* resource)
 {
@@ -526,7 +716,7 @@ static InitFunction initFunction([]()
 				auto& b = bit->first;
 				auto& e = bit->second;
 
-				srt->WalkStack(e ? (char*)e->data() : NULL, e ? e->size() : 0, b ? (char*)b->data() : NULL, b ? b->size() : NULL, vis.GetRef());
+				srt->WalkStack(e ? (char*)e->data() : NULL, e ? e->size() : 0, b ? (char*)b->data() : NULL, b ? b->size() : 0, vis.GetRef());
 			}
 		}
 

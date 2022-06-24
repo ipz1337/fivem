@@ -7,19 +7,24 @@
 
 #include "StdInc.h"
 
-#pragma comment(lib, "comctl32.lib")
-
 #ifndef IS_FXSERVER
 #include <jitasm.h>
 #include "Hooking.Aux.h"
 #include <minhook.h>
+
+#include <ROSSuffix.h>
 
 #pragma comment(lib, "ntdll.lib")
 
 #include <shlobj.h>
 
 #include <winternl.h>
+
+#pragma comment(lib, "comctl32.lib")
 #include <commctrl.h>
+
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
 
 #include <CrossBuildRuntime.h>
 
@@ -57,9 +62,49 @@ static std::wstring g_scFilesRoot = g_programFilesRoot + L"\\Rockstar Games\\Soc
 static std::wstring g_scX86FilesRoot = g_programFilesX86Root + L"\\Rockstar Games\\Social Club";
 static std::wstring g_launcherFilesRoot = g_programFilesRoot + L"\\Rockstar Games\\Launcher";
 
+static std::vector<std::wstring> g_socialClubDlls = ([]
+{
+	std::vector<std::wstring> fns;
+
+	for (const auto fn : {
+		 L"cef.pak",
+		 L"cef_100_percent.pak",
+		 L"cef_200_percent.pak",
+		 L"chrome_elf.dll",
+		 L"d3dcompiler_47.dll",
+		 L"libcef.dll",
+		 L"libEGL.dll",
+		 L"libGLESv2.dll",
+		 L"scui.pak",
+		 L"snapshot_blob.bin",
+		 L"SocialClubHelper.exe",
+		 // RDR3 expects these to exist
+#ifndef IS_RDR3
+		 L"SocialClubD3D12Renderer.dll",
+		 L"SocialClubVulkanLayer.dll",
+#endif
+		 L"v8_context_snapshot.bin",
+		 L"swiftshader\\libEGL.dll",
+		 L"swiftshader\\libGLESv2.dll",
+		 })
+	{
+		fns.push_back(fmt::sprintf(L"Social Club\\%s", fn));
+	}
+
+	return fns;
+})();
+
 static std::wstring MapRedirectedFilename(const wchar_t* origFileName)
 {
 	//trace("map %s\n", ToNarrow(origFileName));
+
+	for (const auto& fileName : g_socialClubDlls)
+	{
+		if (StrStrIW(origFileName, fileName.c_str()) != NULL)
+		{
+			return MakeRelativeCitPath(L"bin\\libEGL.dll");
+		}
+	}
 
 	if (wcsstr(origFileName, L"autosignin.dat") != nullptr)
 	{
@@ -106,11 +151,6 @@ static std::wstring MapRedirectedFilename(const wchar_t* origFileName)
 		return MakeRelativeCitPath(L"nodontfuckingplaygtav.exe");
 	}
 
-	if (wcsstr(origFileName, L"NVIDIA Corporation\\NV_Cache") != nullptr)
-	{
-		return MakeRelativeCitPath(L"data\\cache\\") + &wcsstr(origFileName, L"NVIDIA Corporation\\NV_Cache")[19];
-	}
-
 	// Program Files
 	if (wcsstr(origFileName, L"Files\\Rockstar Games\\Launcher") != nullptr || wcsstr(origFileName, g_launcherFilesRoot.c_str()) != nullptr)
 	{
@@ -120,22 +160,22 @@ static std::wstring MapRedirectedFilename(const wchar_t* origFileName)
 	// ProgramData
 	if (wcsstr(origFileName, L"Data\\Rockstar Games\\Launcher") != nullptr || wcsstr(origFileName, g_launcherProgramDataRoot.c_str()) != nullptr)
 	{
-		return MakeRelativeCitPath(L"data\\game-storage\\ros_launcher_data3") + &wcsstr(origFileName, L"Games\\Launcher")[14];
+		return MakeRelativeCitPath(L"data\\game-storage\\ros_launcher_data" ROS_SUFFIX_W) + &wcsstr(origFileName, L"Games\\Launcher")[14];
 	}
 
 	if (wcsstr(origFileName, L"Local\\Rockstar Games\\Launcher") != nullptr || wcsstr(origFileName, g_launcherAppDataRoot.c_str()) != nullptr)
 	{
-		return MakeRelativeCitPath(L"data\\game-storage\\ros_launcher_appdata3") + &wcsstr(origFileName, L"Games\\Launcher")[14];
+		return MakeRelativeCitPath(L"data\\game-storage\\ros_launcher_appdata" ROS_SUFFIX_W) + &wcsstr(origFileName, L"Games\\Launcher")[14];
 	}
 
 	if (wcsstr(origFileName, L"Documents\\Rockstar Games\\Social Club") != nullptr || wcsstr(origFileName, g_scDocumentsRoot.c_str()) != nullptr)
 	{
-		return MakeRelativeCitPath(L"data\\game-storage\\ros_documents2") + &wcsstr(origFileName, L"Games\\Social Club")[17];
+		return MakeRelativeCitPath(L"data\\game-storage\\ros_documents" ROS_SUFFIX_W) + &wcsstr(origFileName, L"Games\\Social Club")[17];
 	}
 
 	if (wcsstr(origFileName, L"Documents\\Rockstar Games\\Launcher") != nullptr || wcsstr(origFileName, g_launcherDocumentsRoot.c_str()) != nullptr)
 	{
-		return MakeRelativeCitPath(L"data\\game-storage\\ros_launcher_documents2") + &wcsstr(origFileName, L"Games\\Launcher")[14];
+		return MakeRelativeCitPath(L"data\\game-storage\\ros_launcher_documents" ROS_SUFFIX_W) + &wcsstr(origFileName, L"Games\\Launcher")[14];
 	}
 
 	if (getenv("CitizenFX_ToolMode"))
@@ -147,7 +187,7 @@ static std::wstring MapRedirectedFilename(const wchar_t* origFileName)
 
 		auto gameDir = []()
 		{
-			return MakeRelativeCitPath(fmt::sprintf(L"data\\game-storage\\ros_launcher_game_%d", xbr::GetGameBuild()));
+			return MakeRelativeCitPath(L"data\\game-storage\\ros_launcher_game" ROS_SUFFIX_W);
 		};
 
 		if (wcsstr(origFileName, L".exe.part") != nullptr)
@@ -172,8 +212,6 @@ static std::wstring MapRedirectedFilename(const wchar_t* origFileName)
 		else if (wcsstr(origFileName, L"Rockstar Games\\Games") != nullptr)
 		{
 			CreateDirectoryW(gameDir().c_str(), NULL);
-			//CreateDirectoryW((gameDir + L"\\Grand Theft Auto V").c_str(), NULL);
-			//CreateDirectoryW((gameDir + L"\\Red Dead Redemption 2").c_str(), NULL);
 
 			return gameDir() + &wcsstr(origFileName, L"ar Games\\Games")[14];
 		}
@@ -243,11 +281,6 @@ static bool IsMappedFilename(const std::wstring& fileName)
 
 	if (fileName.find(L"Data\\Rockstar Games\\Launcher") != std::string::npos ||
 		fileName.find(g_launcherProgramDataRoot) != std::string::npos)
-	{
-		return true;
-	}
-
-	if (fileName.find(L"NVIDIA Corporation\\NV_Cache") != std::string::npos)
 	{
 		return true;
 	}
@@ -346,6 +379,34 @@ static bool IsMappedFilename(const std::wstring& fileName)
 	return false;
 }
 
+
+
+static thread_local std::tuple<uint16_t, uint16_t, uint16_t, uint16_t> g_nextFileVersion;
+
+static BOOL (WINAPI* g_origVerQueryValueW)(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen);
+
+static BOOL WINAPI VerQueryValueWStub(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen)
+{
+	auto retval = g_origVerQueryValueW(pBlock, lpSubBlock, lplpBuffer, puLen);
+
+	if (retval)
+	{
+		if (memcmp(lpSubBlock, L"\\", sizeof(wchar_t) * 2) == 0)
+		{
+			if (g_nextFileVersion != std::make_tuple<uint16_t, uint16_t, uint16_t, uint16_t>(0, 0, 0, 0))
+			{
+				auto buffer = (VS_FIXEDFILEINFO*)*lplpBuffer;
+				buffer->dwFileVersionMS = (std::get<0>(g_nextFileVersion) << 16) | std::get<1>(g_nextFileVersion);
+				buffer->dwFileVersionLS = (std::get<2>(g_nextFileVersion) << 16) | std::get<3>(g_nextFileVersion);
+
+				g_nextFileVersion = { 0, 0, 0, 0 };
+			}
+		}
+	}
+
+	return retval;
+}
+
 static DWORD(WINAPI* g_origGetFileVersionInfoSizeW)(_In_ LPCWSTR lptstrFilename, _Out_opt_ LPDWORD lpdwHandle);
 
 static DWORD WINAPI GetFileVersionInfoSizeWStub(_In_ LPCWSTR lptstrFilename, _Out_opt_ LPDWORD lpdwHandle)
@@ -361,7 +422,21 @@ static BOOL WINAPI GetFileVersionInfoWStub(_In_ LPCWSTR lptstrFilename, _Reserve
 {
 	std::wstring fileName = MapRedirectedFilename(lptstrFilename);
 
-	return g_origGetFileVersionInfoW(fileName.c_str(), dwHandle, dwLen, lpData);
+	BOOL retval = g_origGetFileVersionInfoW(fileName.c_str(), dwHandle, dwLen, lpData);
+
+	if (retval)
+	{
+		if (StrStrIW(lptstrFilename, L"Social Club\\SocialClub") != NULL)
+		{
+			g_nextFileVersion = {2, 0, 9, 0};
+		}
+		else if (StrStrIW(lptstrFilename, L"Social Club\\libcef.dll") != NULL)
+		{
+			g_nextFileVersion = {85, 3, 9, 0};
+		}
+	}
+
+	return retval;
 }
 
 static DWORD(WINAPI* g_origGetFileVersionInfoSizeA)(_In_ LPCSTR lptstrFilename, _Out_opt_ LPDWORD lpdwHandle);
@@ -527,6 +602,10 @@ NTSTATUS NTAPI LdrLoadDllStub(const wchar_t* fileName, uint32_t* flags, UNICODE_
 		moduleNameStr.find(L"crashhandler64.dll") != std::string::npos ||
 		// Ad Muncher, causes LoopbackTcpServer to crash
 		moduleNameStr.find(L"am64-34121.dll") != std::string::npos ||
+		// 'Overwolf', corrupts memory on RDR (and is generally undesirable)
+		moduleNameStr.find(L"owclient.dll") != std::string::npos ||
+		moduleNameStr.find(L"ow-graphics-vulkan.dll") != std::string::npos ||
+		moduleNameStr.find(L"ow-graphics-hook64.dll") != std::string::npos ||
 #if !defined(IS_RDR3)
 		// VulkanRT loader, we don't use Vulkan, CEF does (to 'collect info'), and this crashes a lot of Vulkan drivers
 		moduleNameStr.find(L"vulkan-1.dll") != std::string::npos ||
@@ -674,6 +753,61 @@ NTSTATUS WINAPI NtOpenFileStub(PHANDLE fileHandle, ACCESS_MASK desiredAccess, PO
 	return g_origNtOpenFile(fileHandle, desiredAccess, objectAttributes, ioBlock, shareAccess, openOptions);
 }
 
+typedef struct _FILE_RENAME_INFORMATION
+{
+	union
+	{
+		BOOLEAN ReplaceIfExists; // FileRenameInformation
+		ULONG Flags; // FileRenameInformationEx
+	} DUMMYUNIONNAME;
+	HANDLE RootDirectory;
+	ULONG FileNameLength;
+	WCHAR FileName[1];
+} FILE_RENAME_INFORMATION;
+
+static NTSTATUS(WINAPI* g_origNtSetInformationFile)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+
+static NTSTATUS WINAPI NtSetInformationFileStub(HANDLE handle, PIO_STATUS_BLOCK sb, PVOID inf, ULONG infSize, FILE_INFORMATION_CLASS cla)
+{
+	auto tls = GetTls();
+
+	if (!tls->inOpenFile)
+	{
+		tls->inOpenFile = true;
+
+		if (cla == 10 /* FileRenameInformation */ || cla == 65 /* FileRenameInformationEx */)
+		{
+			auto origInfo = (const FILE_RENAME_INFORMATION*)inf;
+			std::wstring origFileName{ origInfo->FileName, origInfo->FileNameLength / sizeof(wchar_t) };
+			if (IsMappedFilename(origFileName))
+			{
+				auto newName = MapRedirectedNtFilename(origFileName.c_str());
+
+				// NT doesn't like slashes
+				std::replace(newName.begin(), newName.end(), L'/', L'\\');
+
+				std::vector<uint8_t> info(sizeof(FILE_RENAME_INFORMATION) + (newName.length() * 2));
+				auto newInfo = (FILE_RENAME_INFORMATION*)info.data();
+				newInfo->Flags = origInfo->Flags;
+				newInfo->RootDirectory = origInfo->RootDirectory;
+				newInfo->FileNameLength = newName.size() * sizeof(wchar_t);
+				memcpy(newInfo->FileName, newName.c_str(), newInfo->FileNameLength);
+
+				tls->inOpenFile = false;
+
+				return g_origNtSetInformationFile(handle, sb, info.data(), info.size(), cla);
+			}
+		}
+
+		tls->inOpenFile = false;
+
+		return g_origNtSetInformationFile(handle, sb, inf, infSize, cla);
+	}
+
+
+	return g_origNtSetInformationFile(handle, sb, inf, infSize, cla);
+}
+
 NTSTATUS(WINAPI* g_origNtDeleteFile)(POBJECT_ATTRIBUTES objectAttributes);
 
 NTSTATUS WINAPI NtDeleteFileStub(POBJECT_ATTRIBUTES objectAttributes)
@@ -710,6 +844,67 @@ NTSTATUS WINAPI NtDeleteFileStub(POBJECT_ATTRIBUTES objectAttributes)
 	}
 
 	return g_origNtDeleteFile(objectAttributes);
+}
+
+static DWORD(WINAPI* g_origRtlGetFullPathName_U)(const WCHAR* name, ULONG size, WCHAR* buffer, WCHAR** file_part);
+
+static DWORD WINAPI RtlGetFullPathName_UStub(const WCHAR* name, ULONG size, WCHAR* buffer, WCHAR** file_part)
+{
+	auto tls = GetTls();
+
+	if (!tls->inQueryAttributes)
+	{
+		tls->inQueryAttributes = true;
+
+		if (IsMappedFilename(name))
+		{
+			auto rv = g_origRtlGetFullPathName_U(MapRedirectedFilename(name).c_str(), size, buffer, file_part);
+			tls->inQueryAttributes = false;
+			return rv;
+		}
+
+		tls->inQueryAttributes = false;
+	}
+
+	return g_origRtlGetFullPathName_U(name, size, buffer, file_part);
+}
+
+NTSTATUS(WINAPI* g_origNtQueryFullAttributesFile)(POBJECT_ATTRIBUTES objectAttributes, void* networkInformation);
+
+NTSTATUS WINAPI NtQueryFullAttributesFileStub(POBJECT_ATTRIBUTES objectAttributes, void* networkInformation)
+{
+	auto tls = GetTls();
+
+	if (!tls->inQueryAttributes)
+	{
+		tls->inQueryAttributes = true;
+
+		OBJECT_ATTRIBUTES attributes = *objectAttributes;
+		UNICODE_STRING newString;
+
+		// map the filename
+		std::wstring moduleNameStr(objectAttributes->ObjectName->Buffer, objectAttributes->ObjectName->Length / sizeof(wchar_t));
+
+		if (IsMappedFilename(moduleNameStr))
+		{
+			moduleNameStr = MapRedirectedNtFilename(moduleNameStr.c_str());
+
+			// NT doesn't like slashes
+			std::replace(moduleNameStr.begin(), moduleNameStr.end(), L'/', L'\\');
+
+			// set stuff
+			RtlInitUnicodeString(&newString, moduleNameStr.c_str());
+			attributes.ObjectName = &newString;
+		}
+
+		tls->inQueryAttributes = false;
+
+		NTSTATUS retval = g_origNtQueryFullAttributesFile(&attributes, networkInformation);
+
+		return retval;
+	}
+
+	return g_origNtQueryFullAttributesFile(objectAttributes, networkInformation);
 }
 
 NTSTATUS(WINAPI* g_origNtQueryAttributesFile)(POBJECT_ATTRIBUTES objectAttributes, void* basicInformation);
@@ -1030,12 +1225,16 @@ extern "C" DLL_EXPORT void CoreSetMappingFunction(MappingFunctionType function)
 	MH_CreateHookApi(L"ntdll.dll", "NtOpenFile", NtOpenFileStub, (void**)&g_origNtOpenFile);
 	MH_CreateHookApi(L"ntdll.dll", "NtDeleteFile", NtDeleteFileStub, (void**)&g_origNtDeleteFile);
 	MH_CreateHookApi(L"ntdll.dll", "NtQueryAttributesFile", NtQueryAttributesFileStub, (void**)&g_origNtQueryAttributesFile);
+	MH_CreateHookApi(L"ntdll.dll", "NtQueryFullAttributesFile", NtQueryFullAttributesFileStub, (void**)&g_origNtQueryFullAttributesFile);
+	MH_CreateHookApi(L"ntdll.dll", "NtSetInformationFile", NtSetInformationFileStub, (void**)&g_origNtSetInformationFile);
 	MH_CreateHookApi(L"ntdll.dll", "LdrLoadDll", LdrLoadDllStub, (void**)&g_origLoadDll);
 	MH_CreateHookApi(L"ntdll.dll", "LdrGetProcedureAddress", LdrGetProcedureAddressStub, (void**)&g_origGetProcedureAddress);
+	MH_CreateHookApi(L"ntdll.dll", "RtlGetFullPathName_U", RtlGetFullPathName_UStub, (void**)&g_origRtlGetFullPathName_U);
 	MH_CreateHookApi(L"version.dll", "GetFileVersionInfoSizeW", GetFileVersionInfoSizeWStub, (void**)&g_origGetFileVersionInfoSizeW);
 	MH_CreateHookApi(L"version.dll", "GetFileVersionInfoSizeA", GetFileVersionInfoSizeAStub, (void**)&g_origGetFileVersionInfoSizeA);
 	MH_CreateHookApi(L"version.dll", "GetFileVersionInfoW", GetFileVersionInfoWStub, (void**)&g_origGetFileVersionInfoW);
 	MH_CreateHookApi(L"version.dll", "GetFileVersionInfoA", GetFileVersionInfoAStub, (void**)&g_origGetFileVersionInfoA);
+	MH_CreateHookApi(L"version.dll", "VerQueryValueW", VerQueryValueWStub, (void**)&g_origVerQueryValueW);
 	MH_CreateHookApi(L"kernelbase.dll", "RegOpenKeyExW", RegOpenKeyExWStub, (void**)&g_origRegOpenKeyExW);
 	MH_CreateHookApi(L"kernelbase.dll", "GetFileAttributesExW", GetFileAttributesExWStub, (void**)&g_origGetFileAttributesExW);
 	MH_CreateHookApi(L"kernelbase.dll", "GetProcAddressForCaller", GetProcAddressStub, (void**)&g_origGetProcAddress);

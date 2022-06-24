@@ -9,6 +9,10 @@
 #include "fxScripting.h"
 #include <ManifestVersion.h>
 
+#if __has_include(<PointerArgumentHints.h>)
+#include <PointerArgumentHints.h>
+#endif
+
 #include <ResourceCallbackComponent.h>
 
 #include <chrono>
@@ -26,6 +30,9 @@
 
 #include <scrEngine.h>
 #endif
+
+#include <rapidjson/writer.h>
+#include <MsgpackJson.h>
 
 inline static std::chrono::milliseconds msec()
 {
@@ -338,7 +345,7 @@ static Local<Value> GetStackTrace(TryCatch& eh, V8ScriptRuntime* runtime)
 	return stackTraceHandle.ToLocalChecked();
 }
 
-static OMPtr<V8ScriptRuntime> g_currentV8Runtime;
+static thread_local OMPtr<V8ScriptRuntime> g_currentV8Runtime;
 
 class FxMicrotaskScope
 {
@@ -477,6 +484,14 @@ private:
 public:
 	inline V8LiteNoRuntimePushEnvironment(const node::Environment* env)
 		: m_locker(node::GetIsolate(env)), m_isolateScope(node::GetIsolate(env))
+	{
+	}
+};
+
+class V8NoopPushEnvironment : public BasePushEnvironment
+{
+public:
+	inline ~V8NoopPushEnvironment()
 	{
 	}
 };
@@ -1067,7 +1082,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 	int numArgs = args.Length();
 
 	// verify argument count
-	if (numArgs < 1)
+	if (numArgs < HashGetter::BaseArgs)
 	{
 		return throwException("wrong argument count (needs at least a hash string)");
 	}
@@ -1093,6 +1108,12 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 	auto cxt = runtime->GetContext();
 
 	// the big argument loop
+	Local<Value> a1;
+	if (HashGetter::BaseArgs < numArgs)
+	{
+		a1 = args[HashGetter::BaseArgs];
+	}
+
 	for (int i = HashGetter::BaseArgs; i < numArgs; i++)
 	{
 		// get the type and decide what to do based on it
@@ -1183,6 +1204,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 				case V8MetaFields::ResultAsFloat:
 				case V8MetaFields::ResultAsVector:
 				case V8MetaFields::ResultAsObject:
+					returnResultAnyway = true;
 					returnValueCoercion = metaField;
 					break;
 				}
@@ -1320,6 +1342,35 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 		}
 	}
 
+#if __has_include(<PointerArgumentHints.h>)
+	fx::scripting::ResultType resultTypeIntent = fx::scripting::ResultType::None;
+
+	if (!returnResultAnyway)
+	{
+		resultTypeIntent = fx::scripting::ResultType::Void;
+	}
+	else if (returnValueCoercion == V8MetaFields::ResultAsString)
+	{
+		resultTypeIntent = fx::scripting::ResultType::String;
+	}
+	else if (returnValueCoercion == V8MetaFields::ResultAsInteger || returnValueCoercion == V8MetaFields::ResultAsLong || returnValueCoercion == V8MetaFields::ResultAsFloat || returnValueCoercion == V8MetaFields::Max /* bool */)
+	{
+		resultTypeIntent = fx::scripting::ResultType::Scalar;
+	}
+	else if (returnValueCoercion == V8MetaFields::ResultAsVector)
+	{
+		resultTypeIntent = fx::scripting::ResultType::Vector;
+	}
+#endif
+
+#ifndef IS_FXSERVER
+	bool needsResultCheck = (numReturnValues == 0 || returnResultAnyway);
+	bool hadComplexType = !a1.IsEmpty() && (!a1->IsNumber() && !a1->IsBoolean() && !a1->IsNull());
+
+	auto initialArg1 = context.arguments[0];
+	auto initialArg3 = context.arguments[2];
+#endif
+
 	// invoke the native on the script host
 	if (!FX_SUCCEEDED(scriptHost->InvokeNative(context)))
 	{
@@ -1328,6 +1379,41 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 		return throwException(fmt::sprintf("Execution of native %016x in script host failed: %s", hash, error));
 	}
+
+#ifndef IS_FXSERVER
+	// clean up the result
+	if ((needsResultCheck || hadComplexType) && context.numArguments > 0)
+	{
+		// if this is scrstring but nothing changed (very weird!), fatally fail
+		if (static_cast<uint32_t>(context.arguments[2]) == 0xFEED1212 && initialArg3 == context.arguments[2])
+		{
+			FatalError("Invalid native call in V8 resource '%s'. Please see https://aka.cfx.re/scrstring-mitigation for more information.", runtime->GetResourceName());
+		}
+
+		// if the first value (usually result) is the same as the initial argument, clear the result (usually, result was no-op)
+		// (if vector results, these aren't directly unsafe, and may get incorrectly seen as complex)
+		if (context.arguments[0] == initialArg1 && returnValueCoercion != V8MetaFields::ResultAsVector)
+		{
+			// complex type in first result means we have to clear that result
+			if (hadComplexType)
+			{
+				context.arguments[0] = 0;
+			}
+
+			// if any result is requested and there was *no* change, zero out
+			context.arguments[1] = 0;
+			context.arguments[2] = 0;
+			context.arguments[3] = 0;
+		}
+	}
+#endif
+
+#if __has_include(<PointerArgumentHints.h>)
+	if (resultTypeIntent != fx::scripting::ResultType::None)
+	{
+		fx::scripting::PointerArgumentHints::CleanNativeResult(hash, resultTypeIntent, context.arguments);
+	}
+#endif
 
 	// padded vector struct
 	struct scrVector
@@ -1356,7 +1442,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 		uintptr_t length;
 	};
 
-	// number of Lua results
+	// JS results
 	Local<Value> returnValue = Undefined(args.GetIsolate());
 	int numResults = 0;
 
@@ -1404,14 +1490,45 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 		{
 			scrObject object = *reinterpret_cast<scrObject*>(&context.arguments[0]);
 
-			Local<ArrayBuffer> outValueBuffer = ArrayBuffer::New(GetV8Isolate(), object.length);
+			// try parsing
+			returnValue = Null(GetV8Isolate());
 
-			auto abs = outValueBuffer->GetBackingStore();
-			memcpy(abs->Data(), object.data, object.length);
+			try
+			{
+				msgpack::unpacked unpacked;
+				msgpack::unpack(unpacked, object.data, object.length);
 
-			Local<Uint8Array> outArray = Uint8Array::New(outValueBuffer, 0, object.length);
+				// and convert to a rapidjson object
+				rapidjson::Document document;
+				ConvertToJSON(unpacked.get(), document, document.GetAllocator());
 
-			returnValue = outArray;
+				// write as a json string
+				rapidjson::StringBuffer sb;
+				rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+
+				if (document.Accept(writer))
+				{
+					if (sb.GetString() && sb.GetSize())
+					{
+						auto maybeString = String::NewFromUtf8(GetV8Isolate(), sb.GetString(), NewStringType::kNormal, sb.GetSize());
+						Local<String> string;
+
+						if (maybeString.ToLocal(&string))
+						{
+							auto maybeValue = v8::JSON::Parse(runtime->GetContext(), string);
+							Local<Value> value;
+
+							if (maybeValue.ToLocal(&value))
+							{
+								returnValue = value;
+							}
+						}
+					}
+				}
+			}
+			catch (std::exception& e)
+			{
+			}
 
 			break;
 		}
@@ -1828,7 +1945,7 @@ static std::pair<std::string, FunctionCallback> g_citizenFunctions[] =
 	{ "resultAsFloat", V8_GetMetaField<V8MetaFields::ResultAsFloat> },
 	{ "resultAsString", V8_GetMetaField<V8MetaFields::ResultAsString> },
 	{ "resultAsVector", V8_GetMetaField<V8MetaFields::ResultAsVector> },
-	{ "resultAsObject", V8_GetMetaField<V8MetaFields::ResultAsObject> },
+	{ "resultAsObject2", V8_GetMetaField<V8MetaFields::ResultAsObject> },
 	{ "getResourcePath", V8_GetResourcePath },
 };
 
@@ -2498,6 +2615,10 @@ V8ScriptGlobals::V8ScriptGlobals()
 {
 }
 
+#ifdef V8_NODE
+static thread_local std::stack<std::unique_ptr<BasePushEnvironment>> g_envStack;
+#endif
+
 void V8ScriptGlobals::Initialize()
 {
 	if (m_inited)
@@ -2768,14 +2889,20 @@ void V8ScriptGlobals::Initialize()
 		v8::HandleScope handle_scope(m_isolate);
 		node::MultiIsolatePlatform* nodePlatform = static_cast<node::MultiIsolatePlatform*>(m_platform.get());
 
-		static std::stack<std::unique_ptr<BasePushEnvironment>> envStack;
-
 		node::SetScopeHandler([](const node::Environment* env)
 		{
 			auto runtime = GetEnvRuntime(env);
 
 			if (runtime)
 			{
+				// if already have current runtime on top - push noop env so we won't run microtasks on push env dtor
+				// other approach would be to add refcount to topmost push env
+				if (g_currentV8Runtime.GetRef() == runtime)
+				{
+					g_envStack.push(std::make_unique<V8NoopPushEnvironment>());
+					return;
+				}
+
 				// since the V8 locker might be held by our caller, lock order for V8LitePushEnvironment might not be correct
 				// instead, we will just dare to not push the runtime if we don't need to (and we're already locked)
 
@@ -2786,26 +2913,26 @@ void V8ScriptGlobals::Initialize()
 
 					if (PushEnvironment::TryPush(OMPtr{ runtime }, pe))
 					{
-						envStack.push(std::make_unique<V8LitePushEnvironment>(std::move(pe), runtime, env));
+						g_envStack.push(std::make_unique<V8LitePushEnvironment>(std::move(pe), runtime, env));
 					}
 					else
 					{
-						envStack.push(std::make_unique<V8LiteNoRuntimePushEnvironment>(env));
+						g_envStack.push(std::make_unique<V8LiteNoRuntimePushEnvironment>(env));
 					}
 
 					return;
 				}
 
-				envStack.push(std::make_unique<V8LitePushEnvironment>(runtime, env));
+				g_envStack.push(std::make_unique<V8LitePushEnvironment>(runtime, env));
 			}
 			else
 			{
-				envStack.push(std::make_unique<V8LiteNoRuntimePushEnvironment>(env));
+				g_envStack.push(std::make_unique<V8LiteNoRuntimePushEnvironment>(env));
 			}
 		},
 		[](const node::Environment* env)
 		{
-			envStack.pop();
+			g_envStack.pop();
 		});
 
 #ifndef IS_FXSERVER

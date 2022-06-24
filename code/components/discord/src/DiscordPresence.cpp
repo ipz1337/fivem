@@ -8,7 +8,6 @@
 #include <NetLibrary.h>
 
 #include <ScriptEngine.h>
-#include <scrEngine.h>
 
 #ifdef GTA_FIVE
 #define DEFAULT_APP_ID "382624125287399424"
@@ -70,12 +69,19 @@ static void UpdatePresence()
 			g_richPresenceValues[7]
 		);
 
-		std::string line1 = formattedRichPresence.substr(formattedRichPresence.find_first_of("\n") + 1);
-		std::string line2 = formattedRichPresence.substr(0, formattedRichPresence.find_first_of("\n"));
-
 		if (!g_richPresenceOverride.empty())
 		{
-			line1 = g_richPresenceOverride;
+			formattedRichPresence = g_richPresenceOverride;
+		}
+
+		auto lineOff = formattedRichPresence.find_first_of("\n");
+
+		std::string line1 = formattedRichPresence.substr(0, lineOff);
+		std::string line2;
+
+		if (lineOff != std::string::npos)
+		{
+			line2 = formattedRichPresence.substr(lineOff + 1);
 		}
 
 		if (g_discordAppId != g_lastDiscordAppId) 
@@ -163,18 +169,24 @@ static InitFunction initFunction([]()
 	{
 		g_startTime = time(nullptr);
 
-		g_richPresenceTemplate = text;
+		if (g_richPresenceTemplate != text)
+		{
+			g_richPresenceTemplate = text;
 
-		g_richPresenceChanged = true;
+			g_richPresenceChanged = true;
+		}
 	});
 
 	OnRichPresenceSetValue.Connect([](int idx, const std::string& value)
 	{
 		assert(idx >= 0 && idx < _countof(g_richPresenceValues));
 
-		g_richPresenceValues[idx] = value;
+		if (g_richPresenceValues[idx] != value)
+		{
+			g_richPresenceValues[idx] = value;
 
-		g_richPresenceChanged = true;
+			g_richPresenceChanged = true;
+		}
 	});
 
 	OnRichPresenceSetTemplate("In the menus\n");
@@ -202,18 +214,18 @@ static InitFunction initFunction([]()
 
 	fx::ScriptEngine::RegisterNativeHandler("SET_RICH_PRESENCE", [](fx::ScriptContext& context)
 	{
-		const char* str = context.GetArgument<const char*>(0);
+		std::string newValue;
 
-		if (str)
+		if (const char* str = context.GetArgument<const char*>(0))
 		{
-			g_richPresenceOverride = str;
-		}
-		else
-		{
-			g_richPresenceOverride = "";
+			newValue = str;
 		}
 
-		g_richPresenceChanged = true;
+		if (g_richPresenceOverride != newValue)
+		{
+			g_richPresenceOverride = newValue;
+			g_richPresenceChanged = true;
+		}
 	});
 
 	fx::ScriptEngine::RegisterNativeHandler("SET_DISCORD_RICH_PRESENCE_ACTION", [](fx::ScriptContext& context)

@@ -14,8 +14,8 @@ inline static uintptr_t GetLauncherTriggerEP()
 	{
 		if (wcsstr(GetCommandLineW(), L"launcher.exe"))
 		{
-			// launcher.exe with sha256 hash 0cc0862222ab2a8aa714658aff7d9f5897dfd8eceb0b279ffcda1df9de7e9774
-			return 0x1401F227C;
+			// launcher.exe with sha256 hash 0dbf58119cdd2d67e6ecee1e31be3f19827444df978f7df747064a870736bce4
+			return 0x14020b70c;
 		}
 	}
 
@@ -34,6 +34,16 @@ inline uintptr_t GetTriggerEP()
 	if (Is372())
 	{
 		return 0x141623FC8;
+	}
+
+	if (xbr::IsGameBuild<2612>())
+	{
+		return 0x1417DB78C;
+	}
+
+	if (xbr::IsGameBuild<2545>())
+	{
+		return 0x1417DB000;
 	}
 
 	if (xbr::IsGameBuild<2372>())
@@ -73,7 +83,7 @@ inline uintptr_t GetTriggerEP()
 
 	if (xbr::IsGameBuild<1436>())
 	{
-		return 0x142E8B79C; // 1436.26
+		return 0x142E8D85C; // 1436.28
 	}
 
 	return 0x142E0F92C; // 1311.20

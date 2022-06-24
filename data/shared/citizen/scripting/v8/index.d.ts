@@ -70,6 +70,16 @@ interface CitizenInterface {
     makeRefFunction(refFunction: Function): string
 }
 
+interface CitizenTimer {
+    ref(): CitizenTimer,
+    unref(): CitizenTimer,
+    hasRef(): boolean,
+    refresh(): CitizenTimer,
+    [Symbol.toPrimitive](): number,
+}
+
+type CitizenImmediate = Omit<CitizenTimer, 'refresh'>;
+
 declare var Citizen: CitizenInterface;
 
 declare function addRawEventListener(eventName: string, callback: Function): void
@@ -100,6 +110,15 @@ declare function TriggerLatentClientEvent(eventName: string, target: number|stri
 
 declare function removeEventListener(eventName: string, callback: Function): void
 
+declare function setTimeout<T extends any[]>(callback: (...args: T) => void, ms?: number, ...args: T): CitizenTimer;
+declare function clearTimeout(timeout: CitizenTimer): void;
+
+declare function setInterval<T extends any[]>(callback: (...args: T) => void, ms?: number, ...args: T): CitizenTimer;
+declare function clearInterval(interval: CitizenTimer): void;
+
+declare function setImmediate<T extends any[]>(callback: (...args: T) => void, ...args: T): CitizenImmediate;
+declare function clearImmediate(immediate: CitizenImmediate): void;
+
 declare function setTick(callback: Function): number
 declare function clearTick(callback: number): void
 
@@ -107,7 +126,34 @@ declare function NewStateBag(name: string) : StateBagInterface;
 declare function Entity(entity: number): EntityInterface
 declare var GlobalState : StateBagInterface
 declare function Player(entity: number|string): EntityInterface
+declare var LocalPlayer : EntityInterface
 
 declare var exports: any;
 
 declare var source: number;
+
+// Commented methods are not implemented yet
+interface Console {
+    assert(condition?: boolean, ...data: any[]): void;
+    // clear(): void;
+    count(label?: string): void;
+    countReset(label?: string): void;
+    debug(...data: any[]): void;
+    dir(item?: any, options?: any): void;
+    // dirxml(...data: any[]): void;
+    error(...data: any[]): void;
+    // group(...data: any[]): void;
+    // groupCollapsed(...data: any[]): void;
+    // groupEnd(): void;
+    info(...data: any[]): void;
+    log(...data: any[]): void;
+    // table(tabularData?: any, properties?: string[]): void;
+    time(label?: string): void;
+    timeEnd(label?: string): void;
+    // timeLog(label?: string, ...data: any[]): void;
+    // timeStamp(label?: string): void;
+    trace(...data: any[]): void;
+    warn(...data: any[]): void;
+}
+
+declare var console: Console;

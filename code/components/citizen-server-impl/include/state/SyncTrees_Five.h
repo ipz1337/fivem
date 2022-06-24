@@ -150,6 +150,8 @@ struct CPhysicalGameStateDataNode : GenericSerializeDataNode<CPhysicalGameStateD
 
 	int val1;
 
+	bool unk5;
+
 	template<typename Serializer>
 	bool Serialize(Serializer& s)
 	{
@@ -175,6 +177,11 @@ struct CPhysicalGameStateDataNode : GenericSerializeDataNode<CPhysicalGameStateD
 			val1 = 0;
 		}
 
+		if (Is2545())
+		{
+			s.Serialize(unk5);
+		}
+
 		return true;
 	}
 };
@@ -185,25 +192,28 @@ struct CVehicleGameStateDataNode
 
 	bool Parse(SyncParseState& state)
 	{
-		int radioStation = state.buffer.Read<int>(6);
-		data.radioStation = radioStation;
-
+		int radioStation; 
+		if (Is2545())
+		{
+			radioStation = state.buffer.Read<int>(7);
+		}
+		else
+		{
+			radioStation = state.buffer.Read<int>(6);
+		}
 		bool unk1 = state.buffer.ReadBit();
-
 		int isEngineOn = state.buffer.ReadBit();
-		data.isEngineOn = isEngineOn;
-
 		int isEngineStarting = state.buffer.ReadBit();
-		data.isEngineStarting = isEngineStarting;
-
 		bool unk4 = state.buffer.ReadBit();
-
 		int handbrake = state.buffer.ReadBit();
-		data.handbrake = handbrake;
-
 		bool unk6 = state.buffer.ReadBit();
 		bool unk7 = state.buffer.ReadBit();
 		int unk8 = state.buffer.ReadBit();
+
+		data.radioStation = radioStation;
+		data.isEngineOn = isEngineOn;
+		data.isEngineStarting = isEngineStarting;
+		data.handbrake = handbrake;
 
 		if (!unk8)
 		{
@@ -1337,7 +1347,18 @@ struct CVehicleAngVelocityDataNode
 	}
 };
 
-struct CVehicleSteeringDataNode { bool Parse(SyncParseState& state) { return true; } };
+struct CVehicleSteeringDataNode
+{
+	CVehicleSteeringNodeData data;
+
+	bool Parse(SyncParseState& state)
+	{
+		data.steeringAngle = state.buffer.ReadSignedFloat(10, 1.0f);
+
+		return true;
+	}
+};
+
 struct CVehicleControlDataNode { bool Parse(SyncParseState& state) { return true; } };
 
 struct CVehicleGadgetDataNode
@@ -1630,7 +1651,20 @@ struct CDoorScriptGameStateDataNode
 	}
 };
 
-struct CHeliHealthDataNode { bool Parse(SyncParseState& state) { return true; } };
+struct CHeliHealthDataNode
+{
+	CHeliHealthNodeData data;
+
+	bool Parse(SyncParseState& state)
+	{
+		data.mainRotorHealth = state.buffer.Read<int>(17);
+		data.tailRotorHealth = state.buffer.Read<int>(17);
+
+		bool boomBroken = state.buffer.ReadBit();
+
+		return true;
+	}
+};
 
 struct CHeliControlDataNode
 {
@@ -3256,6 +3290,20 @@ struct SyncTree : public SyncTreeBase
 		}
 
 		return nullptr;
+	}
+
+	virtual CHeliHealthNodeData* GetHeliHealth() override
+	{
+		auto [hasNode, node] = GetData<CHeliHealthDataNode>();
+
+		return hasNode ? &node->data : nullptr;
+	}
+
+	virtual CVehicleSteeringNodeData* GetVehicleSteeringData() override
+	{
+		auto [hasNode, node] = GetData<CVehicleSteeringDataNode>();
+
+		return hasNode ? &node->data : nullptr;
 	}
 
 	virtual void CalculatePosition() override

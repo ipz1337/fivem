@@ -8,6 +8,8 @@
 #include "StdInc.h"
 #include "CitizenGame.h"
 
+// *NASTY* include path
+#include <../citicore/LaunchMode.h>
 #include <CL2LaunchMode.h>
 
 #include <io.h>
@@ -27,10 +29,10 @@
 
 #include <shobjidl.h>
 
+#include <Error.h>
+
 #include <CfxLocale.h>
 #include <filesystem>
-
-extern "C" BOOL WINAPI _CRT_INIT(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
 
 void InitializeDummies();
 std::optional<int> EnsureGamePath();
@@ -43,8 +45,6 @@ std::map<std::string, std::string> UpdateGameCache();
 #pragma comment(lib, "version.lib")
 
 std::map<std::string, std::string> g_redirectionData;
-
-extern "C" int wmainCRTStartup();
 
 void DoPreLaunchTasks();
 void NVSP_DisableOnStartup();
@@ -98,14 +98,38 @@ HANDLE g_uiDoneEvent;
 HANDLE g_uiExitEvent;
 
 bool IsUnsafeGraphicsLibrary();
-void MigrateCacheFromat202105();
+void MigrateCacheFormat202105();
 void UI_DestroyTen();
 
 HMODULE tlsDll;
 
+// list of DLLs to load from system before any other code execution
+const static const wchar_t* g_delayDLLs[] = {
+#include "DelayList.h"
+};
+
 int RealMain()
 {
-	//SetEnvironmentVariableW(L"CitizenFX_ToolMode", L"1");
+	if (auto setSearchPathMode = (decltype(&SetSearchPathMode))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetSearchPathMode"))
+	{
+		setSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT);
+	}
+
+	// load early (delayimp'd) system DLLs
+	auto loadSystemDll = [](auto dll)
+	{
+		wchar_t systemPath[512];
+		GetSystemDirectoryW(systemPath, _countof(systemPath));
+
+		StringCchCat(systemPath, std::size(systemPath), dll);
+
+		LoadLibraryW(systemPath);
+	};
+
+	for (auto dll : g_delayDLLs)
+	{
+		loadSystemDll(dll);
+	}
 
 	bool toolMode = false;
 
@@ -114,9 +138,53 @@ int RealMain()
 		toolMode = true;
 	}
 
+	auto isSubProcess = []()
+	{
+		wchar_t fxApplicationName[MAX_PATH];
+		GetModuleFileName(GetModuleHandle(nullptr), fxApplicationName, _countof(fxApplicationName));
+
+		return wcsstr(fxApplicationName, L"subprocess") != nullptr;
+	}();
+
+#ifdef LAUNCHER_PERSONALITY_MAIN
+	// toggle wait for switch
+	if (wcsstr(GetCommandLineW(), L"-switchcl"))
+	{
+		if (!isSubProcess)
+		{
+			HANDLE hProcess = NULL;
+
+			{
+				HostSharedData<CfxState> initStateOld("CfxInitState");
+
+				hProcess = OpenProcess(SYNCHRONIZE, FALSE, initStateOld->initialGamePid);
+				initStateOld->initialGamePid = 0;
+
+				if (auto eventStr = wcsstr(GetCommandLineW(), L"-switchcl:"))
+				{
+					HANDLE eventHandle = reinterpret_cast<HANDLE>(wcstoull(&eventStr[10], nullptr, 10));
+					SetEvent(eventHandle);
+					CloseHandle(eventHandle);
+				}
+			}
+
+			if (hProcess)
+			{
+				WaitForSingleObject(hProcess, INFINITE);
+				CloseHandle(hProcess);
+			}
+		}
+	}
+#endif
+
 	if (!toolMode)
 	{
 #ifdef LAUNCHER_PERSONALITY_MAIN
+		if (!isSubProcess)
+		{
+			static HostSharedData<TickCountData> initTickCount("CFX_SharedTickCount");
+		}
+
 		// run exception handler
 		if (InitializeExceptionServer())
 		{
@@ -165,27 +233,6 @@ int RealMain()
 	// delete any old .exe.new file
 	_unlink("CitizenFX.exe.new");
 
-	// toggle wait for switch
-	if (wcsstr(GetCommandLineW(), L"-switchcl"))
-	{
-		// if this isn't a subprocess
-		wchar_t fxApplicationName[MAX_PATH];
-		GetModuleFileName(GetModuleHandle(nullptr), fxApplicationName, _countof(fxApplicationName));
-
-		if (wcsstr(fxApplicationName, L"subprocess") == nullptr)
-		{
-			HostSharedData<CfxState> initStateOld("CfxInitState");
-
-			HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, initStateOld->initialGamePid);
-
-			if (hProcess)
-			{
-				WaitForSingleObject(hProcess, INFINITE);
-				CloseHandle(hProcess);
-			}
-		}
-	}
-
 	// initialize our initState instance
 	// this needs to be before *any* MakeRelativeCitPath use in main process
 	HostSharedData<CfxState> initState("CfxInitState");
@@ -200,7 +247,10 @@ int RealMain()
 
 	SetDllDirectory(MakeRelativeCitPath(L"bin").c_str()); // to prevent a) current directory DLL search being disabled and b) xlive.dll being taken from system if not overridden
 
-#ifndef GTA_NY
+	// GTA_NY can't use TLS DLL since it doesn't consistently use the TLS index variable
+	// this is also only important for 'game'-type processes, and may be wrong/unsafe in any other types
+#if !defined(GTA_NY) && defined(LAUNCHER_PERSONALITY_GAME)
+	// first attempt at loading the TLS holder DLL
 	tlsDll = LoadLibraryW(MakeRelativeCitPath(L"CitiLaunch_TLSDummy.dll").c_str());
 #endif
 
@@ -236,19 +286,24 @@ int RealMain()
 	addDllDirs();
 
 	// determine dev mode and do updating
-	wchar_t exeName[512];
-	GetModuleFileName(GetModuleHandle(NULL), exeName, sizeof(exeName) / 2);
-
-	wchar_t* exeBaseName = wcsrchr(exeName, L'\\');
-	exeBaseName[0] = L'\0';
-	exeBaseName++;
-
 #ifdef LAUNCHER_PERSONALITY_MAIN
 	bool devMode = toolMode;
 
-	if (GetFileAttributes(va(L"%s.formaldev", exeBaseName)) != INVALID_FILE_ATTRIBUTES)
 	{
-		devMode = true;
+		wchar_t exeName[512];
+		GetModuleFileName(GetModuleHandle(NULL), exeName, std::size(exeName));
+
+		std::wstring exeNameSaved = exeName;
+
+		wchar_t* exeBaseName = wcsrchr(exeName, L'\\');
+		exeBaseName[0] = L'\0';
+		exeBaseName++;
+
+		if (GetFileAttributes(MakeRelativeCitPath(fmt::sprintf(L"%s.formaldev", exeBaseName)).c_str()) != INVALID_FILE_ATTRIBUTES ||
+			GetFileAttributes(fmt::sprintf(L"%s.formaldev", exeNameSaved).c_str()) != INVALID_FILE_ATTRIBUTES)
+		{
+			devMode = true;
+		}
 	}
 #else
 	bool devMode = true;
@@ -295,9 +350,15 @@ int RealMain()
 		}
 	}
 
-#ifdef LAUNCHER_PERSONALITY_MAIN
-	static HostSharedData<TickCountData> initTickCount("CFX_SharedTickCount");
+	// MasterProcess is safe from this point on
 
+	// copy main process command line, if needed
+	if (initState->IsMasterProcess())
+	{
+		wcsncpy(initState->initCommandLine, GetCommandLineW(), std::size(initState->initCommandLine) - 1);
+	}
+
+#ifdef LAUNCHER_PERSONALITY_MAIN
 	// if not the master process, force devmode
 	if (!devMode)
 	{
@@ -326,7 +387,10 @@ int RealMain()
 	XBR_EarlySelect();
 #endif
 
-#ifndef GTA_NY
+	// crossbuildruntime is safe from this point on
+
+	// try loading TLS DLL a second time, and ensure it *is* loaded
+#if !defined(GTA_NY) && defined(LAUNCHER_PERSONALITY_GAME)
 	if (!tlsDll)
 	{
 		tlsDll = LoadLibraryW(MakeRelativeCitPath(L"CitiLaunch_TLSDummy.dll").c_str());
@@ -387,7 +451,7 @@ int RealMain()
 	// we have to migrate *before* launching the crash handler as that will otherwise create data/cache/
 	if (initState->IsMasterProcess())
 	{
-		MigrateCacheFromat202105();
+		MigrateCacheFormat202105();
 	}
 
 	if (InitializeExceptionHandler())
@@ -396,16 +460,6 @@ int RealMain()
 	}
 
 	InitLogging();
-
-	auto loadSystemDll = [](auto dll)
-	{
-		wchar_t systemPath[512];
-		GetSystemDirectory(systemPath, _countof(systemPath));
-
-		wcscat_s(systemPath, dll);
-
-		LoadLibrary(systemPath);
-	};
 
 	// load some popular DLLs as system-wide variants instead of game variants
 	auto systemDlls = {
@@ -503,14 +557,17 @@ int RealMain()
 		return *gamePathExit;
 	}
 
-	// don't load anything resembling ReShade *at all* until the game is loading(!)
+	// don't load anything resembling ReShade/ENBSeries *at all* until the game is loading(!)
 	loadSystemDll(L"\\dxgi.dll");
 
-	// don't load d3d11.dll from game dir for subprocesses or invalid cases
-	//if ((!initState->IsMasterProcess() && !initState->IsGameProcess()) || IsUnsafeGraphicsLibrary())
-	{
-		loadSystemDll(L"\\d3d11.dll");
-	}
+	// *must* load a d3d11.dll before anything else!
+	// if not, system d3d10.dll etc. may load a d3d11.dll from search path anyway and this may be a 'weird' one
+	loadSystemDll(L"\\d3d11.dll");
+
+	loadSystemDll(L"\\d3d9.dll");
+	loadSystemDll(L"\\d3d10.dll");
+	loadSystemDll(L"\\d3d10_1.dll");
+	loadSystemDll(L"\\opengl32.dll");
 
 #ifndef LAUNCHER_PERSONALITY_CHROME
 	LoadLibrary(MakeRelativeCitPath(L"botan.dll").c_str());
@@ -601,7 +658,13 @@ int RealMain()
 				}
 			}
 
-#ifndef _DEBUG
+			bool checkElevation = !CfxIsWine();
+
+#ifdef _DEBUG
+			checkElevation = false;
+#endif
+
+			if (checkElevation)
 			{
 				HANDLE hToken;
 
@@ -624,7 +687,6 @@ int RealMain()
 					CloseHandle(hToken);
 				}
 			}
-#endif
 
 			{
 				HANDLE hFile = CreateFile(MakeRelativeCitPath(L"writable_test").c_str(), GENERIC_WRITE, FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
@@ -715,25 +777,8 @@ int RealMain()
 				VS_FIXEDFILEINFO* fixedInfo = reinterpret_cast<VS_FIXEDFILEINFO*>(fixedInfoBuffer);
 
 #if defined(GTA_FIVE)
-				auto expectedVersion = 1604;
+				auto expectedVersion = xbr::GetGameBuild();
 
-				if (Is372())
-				{
-					expectedVersion = 372;
-				}
-				else if (Is2060())
-				{
-					expectedVersion = 2060;
-				}
-				else if (Is2189())
-				{
-					expectedVersion = 2189;
-				}
-				else if (Is2372())
-				{
-					expectedVersion = 2372;
-				}
-				
 				if ((fixedInfo->dwFileVersionLS >> 16) != expectedVersion)
 #else
 				auto expectedVersion = 43;
@@ -741,7 +786,7 @@ int RealMain()
 				if ((fixedInfo->dwFileVersionLS & 0xFFFF) != expectedVersion)
 #endif
 				{
-					MessageBox(nullptr, va(L"The found game executable (%s) has version %d.%d.%d.%d, but we're trying to run with 1.0.%d.0. Please obtain this version, and try again.",
+					MessageBox(nullptr, va(L"The found game executable (%s) has version %d.%d.%d.%d, but we're trying to run build %d. Please obtain this version, and try again.",
 										   gameExecutable.c_str(),
 										   (fixedInfo->dwFileVersionMS >> 16),
 										   (fixedInfo->dwFileVersionMS & 0xFFFF),
@@ -978,6 +1023,11 @@ int RealMain()
 					{
 						gameProc();
 					}
+				}
+				else
+				{
+					// a bit of a lie, but it has some of the same causes so should be bucketed together
+					FatalError("Could not load CitizenGame.dll.");
 				}
 
 				return 0;

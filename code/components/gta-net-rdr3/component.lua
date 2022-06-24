@@ -5,7 +5,6 @@ includedirs {
 return function()
 	add_dependencies { 'citizen:resources:client', 'vendor:concurrentqueue' }
 
-	configuration {}
 	filter {}
 
 	files {
@@ -18,5 +17,6 @@ return function()
 		'components/gta-net-five/src/CloneObjectManager.cpp',
 		'components/gta-net-five/src/ObjectIdManager.cpp',
 		'components/gta-net-five/src/rlNetBuffer.cpp',
+		'components/gta-net-five/src/MumbleVoice.cpp',
 	}
 end

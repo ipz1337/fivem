@@ -8,7 +8,8 @@
 #include "StdInc.h"
 #include <om/OMComponent.h>
 
-#include <Resource.h>
+#include <ResourceManager.h>
+#include <Profiler.h>
 
 #include <fxScripting.h>
 
@@ -189,6 +190,27 @@ static void gc_event(MonoProfiler *profiler, MonoGCEvent event, int generation)
 static void gc_event(MonoProfiler* profiler, MonoProfilerGCEvent event, uint32_t generation, mono_bool is_serial)
 #endif
 {
+	if (event == MONO_GC_EVENT_START || event == MONO_GC_EVENT_END)
+	{
+		static auto profiler = fx::ResourceManager::GetCurrent(true)->GetComponent<fx::ProfilerComponent>();
+
+		if (profiler->IsRecording())
+		{
+			bool isMajor = (generation == 1); // sgen seems to only have 0/1 (mono_gc_max_generation == 1)
+			static std::string majorGcString = ".NET Major GC";
+			static std::string minorGcString = ".NET Minor GC";
+
+			if (event == MONO_GC_EVENT_START)
+			{
+				profiler->EnterScope(isMajor ? majorGcString : minorGcString);
+			}
+			else
+			{
+				profiler->ExitScope();
+			}
+		}
+	}
+
 #if defined(_WIN32)
 	switch (event) {
 	// a comment above mono_gc_walk_heap says the following:
@@ -582,7 +604,7 @@ struct MonoAttachment
 	}
 };
 
-DLL_EXPORT void MonoEnsureThreadAttached()
+extern "C" DLL_EXPORT void MonoEnsureThreadAttached()
 {
 	if (!g_rootDomain)
 	{
@@ -657,9 +679,7 @@ static InitFunction initFunction([] ()
 {
 	static ConVar<bool> memoryUsageVar("mono_enableMemoryUsageTracking", ConVar_None, true, &g_enableMemoryUsage);
 
-	// should've been ResourceManager but ResourceManager OnTick happens _after_ individual resource ticks
-	// which is too early for on-start Mono resources to have run
-	fx::Resource::OnInitializeInstance.Connect([](fx::Resource* instance)
+	fx::ResourceManager::OnInitializeInstance.Connect([](fx::ResourceManager* instance)
 	{
 		instance->OnTick.Connect([]()
 		{

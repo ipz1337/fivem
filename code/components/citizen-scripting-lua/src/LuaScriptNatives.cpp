@@ -8,7 +8,12 @@
 #include "StdInc.h"
 
 #if defined(_DEBUG) || defined(BUILD_LUA_SCRIPT_NATIVES)
+#if __has_include(<PointerArgumentHints.h>)
+#include <PointerArgumentHints.h>
+#endif
+
 #include <fxScripting.h>
+#include <Error.h>
 
 #include <vector>
 #include <map>
@@ -18,6 +23,8 @@
 
 #include "LuaScriptNatives.h"
 #include "LuaScriptRuntime.h"
+
+#include <shared_mutex>
 
 extern LUA_INTERNAL_LINKAGE
 {
@@ -452,7 +459,7 @@ LUA_SCRIPT_LINKAGE int Lua_GetNativeHandler(lua_State* L)
 	return 1;
 }
 
-static LONG ShouldHandleUnwind(DWORD exceptionCode, uint64_t identifier);
+static LONG ShouldHandleUnwind(PEXCEPTION_POINTERS ep, DWORD exceptionCode, uint64_t identifier);
 
 static uint64_t g_nativeIdentifier;
 static void* exceptionAddress;
@@ -461,7 +468,7 @@ static __declspec(noinline) LONG FilterFunc(PEXCEPTION_POINTERS exceptionInforma
 {
 	exceptionAddress = exceptionInformation->ExceptionRecord->ExceptionAddress;
 	
-	return ShouldHandleUnwind(exceptionInformation->ExceptionRecord->ExceptionCode, g_nativeIdentifier);
+	return ShouldHandleUnwind(exceptionInformation, exceptionInformation->ExceptionRecord->ExceptionCode, g_nativeIdentifier);
 }
 
 static LUA_INLINE void CallHandler(void* handler, uint64_t nativeIdentifier, rage::scrNativeCallContext& rageContext)
@@ -587,8 +594,40 @@ static int __Lua_InvokeNative(lua_State* L)
 		}
 	}
 
+#if __has_include(<PointerArgumentHints.h>)
+	fx::scripting::ResultType resultTypeIntent = fx::scripting::ResultType::None;
+
+	if (!result.returnResultAnyway)
+	{
+		resultTypeIntent = fx::scripting::ResultType::Void;
+	}
+	else if (result.returnValueCoercion == LuaMetaFields::ResultAsString)
+	{
+		resultTypeIntent = fx::scripting::ResultType::String;
+	}
+	else if (result.returnValueCoercion == LuaMetaFields::ResultAsInteger ||
+		result.returnValueCoercion == LuaMetaFields::ResultAsLong ||
+		result.returnValueCoercion == LuaMetaFields::ResultAsFloat ||
+		result.returnValueCoercion == LuaMetaFields::Max /* bool */)
+	{
+		resultTypeIntent = fx::scripting::ResultType::Scalar;
+	}
+	else if (result.returnValueCoercion == LuaMetaFields::ResultAsVector)
+	{
+		resultTypeIntent = fx::scripting::ResultType::Vector;
+	}
+#endif
+
 	// invoke the native on the script host
 #ifndef IS_FXSERVER
+	// preemptive safety check for the input argument to *not* show up in the output
+	bool needsResultCheck = (result.numReturnValues == 0 || result.returnResultAnyway);
+	auto a1type = lua_type(L, 2);
+	bool hadComplexType = (a1type != LUA_TNUMBER && a1type != LUA_TNIL && a1type != LUA_TBOOLEAN);
+
+	auto initialArg1 = context.arguments[0];
+	auto initialArg3 = context.arguments[2];
+
 	LUA_IF_CONSTEXPR(IsPtr)
 	{
 		// zero out three following arguments
@@ -614,7 +653,7 @@ static int __Lua_InvokeNative(lua_State* L)
 		}
 		catch (std::exception& e)
 		{
-			trace("%s: execution failed: %s\n", __func__, e.what());
+			fx::ScriptTrace("%s: execution failed: %s\n", __func__, e.what());
 			lua_pushstring(L, va("Execution of native %016llx in script host failed: %s", origHash, e.what()));
 			lua_error(L);
 		}
@@ -633,6 +672,41 @@ static int __Lua_InvokeNative(lua_State* L)
 			lua_error(L);
 		}
 	}
+
+#ifndef IS_FXSERVER
+	// clean up the result
+	if ((needsResultCheck || hadComplexType) && context.numArguments > 0)
+	{
+		// if this is scrstring but nothing changed (very weird!), fatally fail
+		if (static_cast<uint32_t>(context.arguments[2]) == SCRSTRING_MAGIC_BINARY && initialArg3 == context.arguments[2])
+		{
+			FatalError("Invalid native call in resource '%s'. Please see https://aka.cfx.re/scrstring-mitigation for more information.", luaRuntime->GetResourceName());
+		}
+
+		// if the first value (usually result) is the same as the initial argument, clear the result (usually, result was no-op)
+		// (if vector results, these aren't directly unsafe, and may get incorrectly seen as complex)
+		if (context.arguments[0] == initialArg1 && result.returnValueCoercion != LuaMetaFields::ResultAsVector)
+		{
+			// complex type in first result means we have to clear that result
+			if (hadComplexType)
+			{
+				context.arguments[0] = 0;
+			}
+
+			// if any result is requested and there was *no* change, zero out
+			context.arguments[1] = 0;
+			context.arguments[2] = 0;
+			context.arguments[3] = 0;
+		}
+	}
+#endif
+
+#if __has_include(<PointerArgumentHints.h>)
+	if (resultTypeIntent != fx::scripting::ResultType::None)
+	{
+		fx::scripting::PointerArgumentHints::CleanNativeResult(origHash, resultTypeIntent, context.arguments);
+	}
+#endif
 
 	// number of Lua results
 	int numResults = 0;
@@ -683,7 +757,7 @@ static int __Lua_InvokeNative(lua_State* L)
 			case LuaMetaFields::ResultAsObject:
 			{
 				scrObject object = *reinterpret_cast<scrObject*>(&context.arguments[0]);
-				lua_pushlstring(L, object.data, object.length);
+				luaRuntime->ResultAsObject(L, std::string_view{ object.data, object.length });
 				break;
 			}
 			case LuaMetaFields::ResultAsInteger:
@@ -772,8 +846,17 @@ LUA_SCRIPT_LINKAGE int Lua_InvokeNative2(lua_State* L)
 LUA_SCRIPT_LINKAGE int Lua_LoadNative(lua_State* L)
 {
 	const char* fn = luaL_checkstring(L, 1);
-
+	auto fnHash = HashRageString(fn);
 	auto& runtime = fx::LuaScriptRuntime::GetCurrent();
+	auto& nonExistentNatives = runtime->GetNonExistentNativesList();
+
+	{
+		if (nonExistentNatives.find(fnHash) != nonExistentNatives.end())
+		{
+			lua_pushnil(L);
+			return 1;
+		}
+	}
 
 	try
 	{
@@ -800,10 +883,17 @@ LUA_SCRIPT_LINKAGE int Lua_LoadNative(lua_State* L)
 
 		fx::OMPtr<fxIStream> stream;
 
-		result_t hr = runtime->GetScriptHost()->OpenSystemFile(const_cast<char*>(va("%s0x%08x.lua", runtime->GetNativesDir(), HashRageString(fn))), stream.GetAddressOf());
+		result_t hr = runtime->GetScriptHost()->OpenSystemFile(const_cast<char*>(va("%s0x%08x.lua", runtime->GetNativesDir(), fnHash)), stream.GetAddressOf());
+
+		auto invalid = [&nonExistentNatives, fnHash]()
+		{
+			nonExistentNatives.insert(fnHash);
+		};
 
 		if (!FX_SUCCEEDED(hr))
 		{
+			invalid();
+
 			lua_pushnil(L);
 			return 1;
 		}
@@ -813,6 +903,8 @@ LUA_SCRIPT_LINKAGE int Lua_LoadNative(lua_State* L)
 
 		if (FX_FAILED(hr = stream->GetLength(&length)))
 		{
+			invalid();
+
 			lua_pushnil(L);
 			return 1;
 		}
@@ -820,6 +912,8 @@ LUA_SCRIPT_LINKAGE int Lua_LoadNative(lua_State* L)
 		std::vector<char> fileData(length + 1);
 		if (FX_FAILED(hr = stream->Read(&fileData[0], length, nullptr)))
 		{
+			invalid();
+
 			lua_pushnil(L);
 			return 1;
 		}
@@ -1218,8 +1312,13 @@ struct LuaNativeWrapper
 	}
 };
 
-static LONG ShouldHandleUnwind(DWORD exceptionCode, uint64_t identifier)
+static LONG ShouldHandleUnwind(PEXCEPTION_POINTERS ep, DWORD exceptionCode, uint64_t identifier)
 {
+	if (IsErrorException(ep))
+	{
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
 	// C++ exceptions?
 	if (exceptionCode == 0xE06D7363)
 	{
@@ -1257,8 +1356,9 @@ struct LuaNativeContext
 		__try
 		{
 			nw->handler(&rawCxt);
+			// rawCxt.SetVectorResults(); // codegen_out_native_lua should handle this operation
 		}
-		__except (exceptionAddress = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress, ShouldHandleUnwind((GetExceptionInformation())->ExceptionRecord->ExceptionCode, hash))
+		__except (exceptionAddress = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress, ShouldHandleUnwind(GetExceptionInformation(), (GetExceptionInformation())->ExceptionRecord->ExceptionCode, hash))
 		{
 			throw std::exception(va("Error executing native 0x%016llx at address %p.", hash, exceptionAddress));
 		}

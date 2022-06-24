@@ -61,15 +61,15 @@ void ObjectIds_ReturnObjectId(uint16_t objectId);
 
 static void netObjectMgrBase__DestroyNetworkObject(rage::netObjectMgr* manager, rage::netObject* object)
 {
-	CD_FreeSyncData(object->GetObjectId());
-
 	if (!icgi->OneSyncEnabled)
 	{
+		CD_FreeSyncData(object->GetObjectId());
 		return g_orig_netObjectMgrBase__DestroyNetworkObject(manager, object);
 	}
 
 	if (!object->syncData.shouldNotBeDeleted)
 	{
+		CD_FreeSyncData(object->GetObjectId());
 		CloneObjectMgr->DestroyNetworkObject(object);
 
 		if (!object->syncData.isRemote && object->syncData.nextOwnerId == 0xFF)
@@ -90,10 +90,12 @@ static void netObjectMgrBase__ChangeOwner(rage::netObjectMgr* manager, rage::net
 		return g_orig_netObjectMgrBase__ChangeOwner(manager, object, targetPlayer, migrationType);
 	}
 
+	auto oldOwnerId = object->syncData.ownerId;
+
 	object->ChangeOwner(targetPlayer, migrationType);
 	object->PostMigrate(migrationType);
 
-	CloneObjectMgr->ChangeOwner(object, targetPlayer, migrationType);
+	CloneObjectMgr->ChangeOwner(object, oldOwnerId, targetPlayer, migrationType);
 }
 
 static rage::netObject* (*g_orig_netObjectMgrBase__GetNetworkObject)(rage::netObjectMgr* manager, uint16_t id, bool evenIfDeleting);

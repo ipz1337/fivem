@@ -189,6 +189,11 @@ namespace rage
 	}
 }
 
+extern "C" DLL_EXPORT uint64_t MapNative(uint64_t inNative)
+{
+	return rage::MapNative(inNative);
+}
+
 static TableGenerator tableGen;
 
 static void(*registerNative)(void*, uint64_t, void*);
@@ -204,7 +209,7 @@ static struct
 
 struct CrossMappingEntry
 {
-	uint64_t entries[25];
+	uint64_t entries[26];
 };
 
 static void DoMapping(std::map<int, std::shared_ptr<FunctionTable>>& functionTables)
@@ -218,7 +223,15 @@ static void DoMapping(std::map<int, std::shared_ptr<FunctionTable>>& functionTab
 
 	int versionIdx = -1;
 
-	if (strncmp(buildString, "Jul 15 2021", 11) == 0)
+	if (strncmp(buildString, "Apr 18 2022", 11) == 0)
+	{
+		versionIdx = 2612;
+	}
+	else if (strncmp(buildString, "Dec 14 2021", 11) == 0)
+	{
+		versionIdx = 2545;
+	}
+	else if (strncmp(buildString, "Jul 15 2021", 11) == 0)
 	{
 		versionIdx = 2372;
 	}
@@ -289,13 +302,13 @@ static void DoMapping(std::map<int, std::shared_ptr<FunctionTable>>& functionTab
 	// if 393, this will likely be true
 	bool isPostNativeVersion = true;
 
-	static CrossMappingEntry crossMapping_universal[] =
+	static const CrossMappingEntry crossMapping_universal[] =
 	{
 #include "CrossMapping_Universal.h"
 	};
 
 	int maxVersion = 0;
-	auto newVersions = { 350, 372, 393, 463, 505, 573, 617, 678, 757, 791, 877, 944, 1011, 1103, 1180, 1290, 1365, 1493, 1604, 1737, 1868, 2060, 2189, 2372 };
+	auto newVersions = { 350, 372, 393, 463, 505, 573, 617, 678, 757, 791, 877, 944, 1011, 1103, 1180, 1290, 1365, 1493, 1604, 1737, 1868, 2060, 2189, 2372, 2545 };
 
 	for (auto version : newVersions)
 	{
@@ -322,9 +335,17 @@ static void DoMapping(std::map<int, std::shared_ptr<FunctionTable>>& functionTab
 	{
 		assert(maxVersion == 24);
 	}
-	else
+	else if (Is2545() || Is2612())
+	{
+		assert(maxVersion == 25);
+	}
+	else if (Is1604())
 	{
 		assert(maxVersion == 19);
+	}
+	else
+	{
+		assert(!"Didn't define maxVersion assertion!");
 	}
 
 	for (auto& nativeEntry : crossMapping_universal)

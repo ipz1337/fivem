@@ -10,6 +10,7 @@
 #include <MinHook.h>
 
 static int WeaponDamageModifierOffset;
+static int WeaponAnimationOverrideOffset;
 
 static uint16_t* g_weaponCount;
 static uint64_t** g_weaponList;
@@ -138,6 +139,7 @@ static std::atomic_bool g_SET_WEAPONS_NO_AUTORELOAD = false;
 static std::atomic_bool g_SET_WEAPONS_NO_AUTOSWAP = false;
 
 static bool (*origCPedWeapMgr_AutoSwap)(unsigned char*, bool, bool);
+static std::atomic_bool attemptedSwap = false;
 static bool __fastcall CPedWeaponManager_AutoSwap(unsigned char* thisptr, bool opt1, bool opt2)
 {
 	if (!g_SET_WEAPONS_NO_AUTOSWAP || *(CPed**)(thisptr + 16) != getLocalPlayerPed())
@@ -145,7 +147,7 @@ static bool __fastcall CPedWeaponManager_AutoSwap(unsigned char* thisptr, bool o
 		return origCPedWeapMgr_AutoSwap(thisptr, opt1, opt2);
 	}
 
-	// Don't do the autoswap
+	attemptedSwap = true;
 	return false;
 }
 
@@ -210,13 +212,26 @@ static bool __fastcall CPedEquippedWeapon_SetupAsWeapon( unsigned char* thisptr,
 	return result;
 }
 
+static void* (*g_TransitionStageFunc)(void*, int);
+static void* CTaskGun_Stage1_1_TransitionStage(void* CTask, int newStage)
+{
+	CPed* ped = *(CPed**)(uintptr_t(CTask) + 16);
+
+	if (ped == getLocalPlayerPed() && attemptedSwap)
+	{
+		attemptedSwap = false;
+		return g_TransitionStageFunc(CTask, 1);
+	}
+	return g_TransitionStageFunc(CTask, newStage);
+}
+
 typedef void* (*CTaskAimGunOnFootProcessStagesFn)(unsigned char*, int, int);
 static CTaskAimGunOnFootProcessStagesFn origCTaskAimGunOnFoot_ProcessStages;
 static void* CTaskAimGunOnFoot_ProcessStages(unsigned char* thisptr, int stage, int substage)
 {
 	// Borrow the GetWeapon() and offset into Ped from another vfunc in this class.
 	static unsigned char* addr = hook::get_pattern<unsigned char>("0F 84 ? ? ? ? 48 8B 8F ? ? ? ? E8 ? ? ? ? 48 8B F0");
-	static uint32_t pedOffsetToWeapon = *(uint32_t*)(addr + 9);
+	static uint32_t pedOffsetToWeaponMgr = *(uint32_t*)(addr + 9);
 	typedef CWeapon* (*GetWeaponFn)(void*);
 	static GetWeaponFn GetWeapon = hook::get_address<GetWeaponFn>((uintptr_t)addr + 13, 1, 5);
 
@@ -229,19 +244,46 @@ static void* CTaskAimGunOnFoot_ProcessStages(unsigned char* thisptr, int stage, 
 
 	if (stage == 2 && substage == 1)
 	{
-		CWeapon* pWeap = GetWeapon(*(void**)(uintptr_t(ped) + pedOffsetToWeapon));
+		CWeapon* pWeap = GetWeapon(*(void**)(uintptr_t(ped) + pedOffsetToWeaponMgr));
 		if (pWeap && !pWeap->ammoInClip)
 		{
-			// Gradual state step-down from shooting to idle. (return value is unused)
-			// this is to fix a spasm when running out of ammo
-			origCTaskAimGunOnFoot_ProcessStages(thisptr, 2, 2);
-			origCTaskAimGunOnFoot_ProcessStages(thisptr, 1, 0);
-			return origCTaskAimGunOnFoot_ProcessStages(thisptr, 1, 1);
+			// Change state from shooting to idle - this is to fix a spasm when running out of ammo
+			g_TransitionStageFunc(thisptr, 5);
 		}
 	}
 
 	return origCTaskAimGunOnFoot_ProcessStages(thisptr, stage, substage);
 }
+
+static std::atomic_bool g_actionStateAimCooldownEnabled = false;
+static std::atomic_int g_actionStateAimCooldownMS = 0;
+static bool (*g_origShouldAim)(void*);
+// This function is inside of CTaskMotionPed::ProcessFSM()
+//    -- Stage 16_1(action ready state) where it would normally transition to Stage 13(shooting state)
+static bool ShouldAim(void* cTaskMotionPed)
+{
+	void* taskPed = *(void**)((uintptr_t)cTaskMotionPed + 0x10);
+	if (taskPed != getLocalPlayerPed())
+	{
+		goto orig;
+	}
+
+	if (g_actionStateAimCooldownEnabled)
+	{
+		static DWORD lastAimMS = 0;
+
+		if ((GetTickCount() - lastAimMS) > g_actionStateAimCooldownMS)
+		{
+			lastAimMS = GetTickCount();
+			return g_origShouldAim(cTaskMotionPed);
+		}
+		return false;
+	}
+
+orig:
+	return g_origShouldAim(cTaskMotionPed);
+}
+
 
 static HookFunction hookFunction([]()
 {
@@ -254,6 +296,7 @@ static HookFunction hookFunction([]()
 
 	{
 		WeaponDamageModifierOffset = *hook::get_pattern<int>("48 85 C9 74 ? F3 0F 10 81 ? ? ? ? F3 0F 59 81", 9);
+		WeaponAnimationOverrideOffset = *hook::get_pattern<int>("8B 9F ? ? ? ? 85 DB 75 3E", 2);
 	}
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_WEAPON_DAMAGE_MODIFIER", [](fx::ScriptContext& context)
@@ -328,6 +371,38 @@ static HookFunction hookFunction([]()
 		}
 	});
 
+	fx::ScriptEngine::RegisterNativeHandler("SET_AIM_COOLDOWN", [](fx::ScriptContext& context)
+	{
+		int value = context.GetArgument<int>(0);
+
+		g_actionStateAimCooldownEnabled = (value > 0);
+		g_actionStateAimCooldownMS = value;
+
+		fx::OMPtr<IScriptRuntime> runtime;
+		if (FX_SUCCEEDED(fx::GetCurrentScriptRuntime(&runtime)))
+		{
+			fx::Resource* resource = reinterpret_cast<fx::Resource*>(runtime->GetParentObject());
+
+			resource->OnStop.Connect([]()
+			{
+				g_actionStateAimCooldownEnabled = false;
+			});
+		}
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_WEAPON_ANIMATION_OVERRIDE", [](fx::ScriptContext& context)
+	{
+		uint32_t animation = 0;
+		fwEntity* entity = rage::fwScriptGuid::GetBaseFromGuid(context.GetArgument<int>(0));
+
+		if (entity && entity->IsOfType<CPed>())
+		{
+			animation = *(uint32_t*)((char*)entity + WeaponAnimationOverrideOffset);
+		}
+
+		context.SetResult<uint32_t>(animation);
+	});
+
 	Instance<ICoreGameInit>::Get()->OnShutdownSession.Connect([]()
 	{
 		g_SET_FLASH_LIGHT_KEEP_ON_WHILE_MOVING = false;
@@ -350,17 +425,21 @@ static HookFunction hookFunction([]()
 		}
 		else
 		{
-			autoswap = hook::get_pattern("48 8B 8B ? ? 00 00 45 33 C0 33 D2 E8 ? ? ? ? EB", 12);
+			autoswap = hook::get_pattern("EB ? 45 33 C0 33 D2 E8 ? ? ? ? EB ? 41", 7);
 		}
 		hook::set_call(&origCPedWeapMgr_AutoSwap, autoswap);
 		hook::call(autoswap, CPedWeaponManager_AutoSwap);
+
+		void* cTaskGun_Stage1_1_TransitionStage = hook::get_pattern("48 8B CF E8 ? ? ? ? E9 ? ? ? ? ? 85 ? 0F 84 ? ? ? ? 8A 83", 3);
+		hook::set_call(&g_TransitionStageFunc, cTaskGun_Stage1_1_TransitionStage);
+		hook::call(cTaskGun_Stage1_1_TransitionStage, CTaskGun_Stage1_1_TransitionStage);
 	}
 
 	// Disable auto-reloads
 	{
 		MH_Initialize();
 		MH_CreateHook(hook::get_pattern("40 53 48 83 EC 20 4C 8B 49 40 33 DB"), WantsReload, (void**)&origWantsReload);
-		MH_CreateHook(hook::get_pattern("48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 30 48 8B 44 24 78 41 8A"), CPedEquippedWeapon_SetupAsWeapon, (void**)&origSetupAsWeapon);
+		MH_CreateHook(hook::get_address<LPVOID>(hook::get_pattern("45 33 C9 45 33 C0 48 8B D0 48 8B CB E8 ? ? ? ? 48 83 C4 40", 12), 1, 5), CPedEquippedWeapon_SetupAsWeapon, (void**)&origSetupAsWeapon);
 		MH_EnableHook(MH_ALL_HOOKS);
 
 		// Get the original CWeapon vtable - We will plant a vmt-hook on weapons that we own so we can track their destruction.
@@ -379,4 +458,9 @@ static HookFunction hookFunction([]()
 	uintptr_t* cTaskAimGun_vtable = hook::get_address<uintptr_t*>(hook::get_pattern<unsigned char>("48 89 44 24 20 E8 ? ? ? ? 48 8D 05 ? ? ? ? 48 8D 8B 20 01", 13));
 	origCTaskAimGunOnFoot_ProcessStages = (CTaskAimGunOnFootProcessStagesFn)cTaskAimGun_vtable[14];
 	hook::put(&cTaskAimGun_vtable[14], (uintptr_t)CTaskAimGunOnFoot_ProcessStages);
+
+	// Hook inside of CTaskMotionPed - Stage 16_1 -- Used for a cooldown on spamming movements+aiming to optionally hinder 'speedboosting'
+	void* shouldAimCall = hook::pattern("E8 ? ? ? ? 84 C0 0F 84 ? ? ? ? 48 8B CB E8 ? ? ? ? 84 C0 0F 84 ? ? ? ? F3 0F 10 B7 80 05 00 00").count(4).get(0).get<void>();
+	hook::set_call(&g_origShouldAim, shouldAimCall);
+	hook::call(shouldAimCall, ShouldAim);
 });

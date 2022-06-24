@@ -73,6 +73,8 @@ public:
 
 	void UpdateDeferrals();
 
+	void RanEvents();
+
 	TCallbackMap GetCallbacks();
 
 private:
@@ -110,7 +112,11 @@ private:
 	std::map<std::string, DeferralState> m_deferralStates;
 	std::map<std::string, std::string> m_handoverData;
 
+	std::string m_nextCard;
+
 	bool m_completed;
+	bool m_ranEvents = false;
+	bool m_pending = false;
 
 	fx::ServerInstanceBase* m_instance;
 

@@ -58,6 +58,19 @@
 #include <ArchetypesCollector.h>
 #endif
 
+inline auto& GetEarlyGameFrame()
+{
+	auto& earlyGameFrame =
+#if defined(HAS_EARLY_GAME_FRAME)
+	OnEarlyGameFrame
+#else
+	OnGameFrame
+#endif
+	;
+
+	return earlyGameFrame;
+}
+
 std::string g_lastConn;
 static std::string g_connectNonce;
 
@@ -84,28 +97,22 @@ static void SaveBuildNumber(uint32_t build)
 	}
 }
 
-void RestartGameToOtherBuild(int build = 0)
+void RestartGameToOtherBuild(int build, int pureLevel)
 {
 #if defined(GTA_FIVE) || defined(IS_RDR3)
+	SECURITY_ATTRIBUTES securityAttributes = { 0 };
+	securityAttributes.bInheritHandle = TRUE;
+
+	HANDLE switchEvent = CreateEventW(&securityAttributes, TRUE, FALSE, NULL);
+
 	static HostSharedData<CfxState> hostData("CfxInitState");
-	const wchar_t* cli;
-
-	if (!build)
-	{
-		cli = va(L"\"%s\" %s -switchcl \"fivem://connect/%s\"",
-		hostData->gameExePath,
-		xbr::IsGameBuild<2060>() ? L"" : L"-b2060",
-		ToWide(g_lastConn));
-
-		build = (xbr::IsGameBuild<2060>()) ? 1604 : 2060;
-	}
-	else
-	{
-		cli = va(L"\"%s\" %s -switchcl \"fivem://connect/%s\"",
-		hostData->gameExePath,
-		build == 1604 ? L"" : fmt::sprintf(L"-b%d", build),
-		ToWide(g_lastConn));
-	}
+	auto cli = fmt::sprintf(L"\"%s\" %s %s %s -switchcl:%d \"fivem://connect/%s\"",
+	hostData->gameExePath,
+	build == 1604 ? L"" : fmt::sprintf(L"-b%d", build),
+	IsCL2() ? L"-cl2" : L"",
+	pureLevel == 0 ? L"" : fmt::sprintf(L"-pure_%d", pureLevel),
+	(uintptr_t)switchEvent,
+	ToWide(g_lastConn));
 
 	uint32_t defaultBuild =
 #ifdef GTA_FIVE
@@ -123,21 +130,41 @@ void RestartGameToOtherBuild(int build = 0)
 		SaveBuildNumber(defaultBuild);
 	}
 
-	STARTUPINFOW si = { 0 };
-	si.cb = sizeof(si);
+	trace("Switching from build %d to build %d...\n", xbr::GetGameBuild(), build);
+
+	SIZE_T size = 0;
+	InitializeProcThreadAttributeList(NULL, 1, 0, &size);
+
+	std::vector<uint8_t> attListData(size);
+	auto attList = (LPPROC_THREAD_ATTRIBUTE_LIST)attListData.data();
+
+	assert(attList);
+
+	InitializeProcThreadAttributeList(attList, 1, 0, &size);
+	UpdateProcThreadAttribute(attList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &switchEvent, sizeof(HANDLE), NULL, NULL);
+
+	STARTUPINFOEXW si = { 0 };
+	si.StartupInfo.cb = sizeof(si);
+	si.lpAttributeList = attList;
 
 	PROCESS_INFORMATION pi;
 
-	if (!CreateProcessW(NULL, const_cast<wchar_t*>(cli), NULL, NULL, FALSE, CREATE_BREAKAWAY_FROM_JOB, NULL, NULL, &si, &pi))
+	if (!CreateProcessW(NULL, const_cast<wchar_t*>(cli.c_str()), NULL, NULL, TRUE, CREATE_BREAKAWAY_FROM_JOB | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &si.StartupInfo, &pi))
 	{
 		trace("failed to exit: %d\n", GetLastError());
+	}
+	else
+	{
+		// to silence VS analyzers
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
 	}
 
 	ExitProcess(0x69);
 #endif
 }
 
-extern void InitializeBuildSwitch(int build);
+extern void InitializeBuildSwitch(int build, int pureLevel);
 
 void saveSettings(const wchar_t *json) {
 	PWSTR appDataPath;
@@ -198,28 +225,6 @@ inline ISteamComponent* GetSteam()
 	return steamComponent;
 }
 
-inline bool HasDefaultName()
-{
-	auto steamComponent = GetSteam();
-
-	if (steamComponent)
-	{
-		IClientEngine* steamClient = steamComponent->GetPrivateClient();
-
-		if (steamClient)
-		{
-			InterfaceMapper steamFriends(steamClient->GetIClientFriends(steamComponent->GetHSteamUser(), steamComponent->GetHSteamPipe(), "CLIENTFRIENDS_INTERFACE_VERSION001"));
-
-			if (steamFriends.IsValid())
-			{
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
 NetLibrary* netLibrary;
 static bool g_connected;
 
@@ -239,7 +244,7 @@ static void SetNickname(const std::string& name)
 
 	const char* text = netLibrary->GetPlayerName();
 
-	if (text != name && !HasDefaultName())
+	if (text != name && !name.empty())
 	{
 		trace("Loaded nickname: %s\n", name);
 		netLibrary->SetPlayerName(name.c_str());
@@ -501,11 +506,21 @@ static void UpdatePendingAuthPayload()
 	}
 }
 
+static void DisconnectCmd()
+{
+	if (netLibrary->GetConnectionState() != 0)
+	{
+		OnKillNetwork("Disconnected.");
+		OnMsgConfirm();
+	}
+}
+
 static InitFunction initFunction([] ()
 {
 	static std::function<void()> g_onYesCallback;
 	static std::function<void()> backfillDoneEvent;
 	static bool mpMenuExpectsBackfill;
+	static bool disconnect;
 
 	static ipc::Endpoint ep("launcherTalk", false);
 
@@ -516,12 +531,34 @@ static InitFunction initFunction([] ()
 
 	OnGameFrame.Connect([]()
 	{
+		if (disconnect)
+		{
+			DisconnectCmd();
+			disconnect = false;
+		}
+
 		ep.RunFrame();
 	});
 
 	Instance<ICoreGameInit>::Get()->OnGameRequestLoad.Connect([]()
 	{
 		ep.Call("loading");
+	});
+
+	InputHook::DeprecatedOnWndProc.Connect([](HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, bool& pass, LRESULT& lresult)
+	{
+		// we don't want the game to be informed about the system entering a low-power state
+		if (msg == WM_POWERBROADCAST)
+		{
+			// if the system is resumed, we do want to try to manually disconnect
+			if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND)
+			{
+				disconnect = true;
+			}
+
+			pass = false;
+			lresult = true;
+		}
 	});
 
 	NetLibrary::OnNetLibraryCreate.Connect([] (NetLibrary* lib)
@@ -577,22 +614,15 @@ static InitFunction initFunction([] ()
 			nui::PostRootMessage(fmt::sprintf(R"({ "type": "setServerAddress", "data": "%s" })", peerAddress));
 		});
 
-		netLibrary->OnRequestBuildSwitch.Connect([](int build)
+		netLibrary->OnRequestBuildSwitch.Connect([](int build, int pureLevel)
 		{
-			InitializeBuildSwitch(build);
+			InitializeBuildSwitch(build, pureLevel);
 			g_connected = false;
 		});
 
 		netLibrary->OnConnectionErrorRichEvent.Connect([] (const std::string& errorOrig, const std::string& metaData)
 		{
 			std::string error = errorOrig;
-
-#ifdef GTA_FIVE
-			if (strstr(error.c_str(), "This server requires a different game build"))
-			{
-				RestartGameToOtherBuild();
-			}
-#endif
 
 			if ((strstr(error.c_str(), "steam") || strstr(error.c_str(), "Steam")) && !strstr(error.c_str(), ".ms/verify"))
 			{
@@ -935,11 +965,7 @@ static InitFunction initFunction([] ()
 
 	static ConsoleCommand disconnectCommand("disconnect", []()
 	{
-		if (netLibrary->GetConnectionState() != 0)
-		{
-			OnKillNetwork("Disconnected.");
-			OnMsgConfirm();
-		}
+		DisconnectCmd();
 	});
 
 	static std::string curChannel;
@@ -1155,7 +1181,7 @@ static InitFunction initFunction([] ()
 		else if (!_wcsicmp(type, L"exit"))
 		{
 			// queue an ExitProcess on the next game frame
-			OnGameFrame.Connect([] ()
+			GetEarlyGameFrame().Connect([]()
 			{
 				AddVectoredExceptionHandler(FALSE, TerminateInstantly);
 
@@ -1164,7 +1190,6 @@ static InitFunction initFunction([] ()
 				TerminateProcess(GetCurrentProcess(), 0);
 			});
 		}
-#ifdef GTA_FIVE
 		else if (!_wcsicmp(type, L"setDiscourseIdentity"))
 		{
 			try
@@ -1225,7 +1250,6 @@ static InitFunction initFunction([] ()
 				trace("failed to set discourse identity: %s\n", e.what());
 			}
 		}
-#endif
 		else if (!_wcsicmp(type, L"submitCardResponse"))
 		{
 			try
@@ -1291,7 +1315,7 @@ static InitFunction initFunction([] ()
 		}
 	});
 
-	OnGameFrame.Connect([]()
+	GetEarlyGameFrame().Connect([]()
 	{
 		static bool hi;
 
@@ -1547,7 +1571,7 @@ static InitFunction connectInitFunction([]()
 	nng_pull0_open(&netAuthSocket);
 	nng_listen(netAuthSocket, "ipc:///tmp/fivem_auth", &authListener, 0);
 
-	OnGameFrame.Connect([]()
+	GetEarlyGameFrame().Connect([]()
 	{
 		if (Instance<ICoreGameInit>::Get()->GetGameLoaded())
 		{

@@ -8,14 +8,14 @@ import { filterProjectName } from 'app/servers/server-utils';
 import { intervalToDuration } from 'date-fns';
 import { Observable, of } from 'rxjs';
 import { catchError, concatMap, map } from 'rxjs/operators';
-import { PostCreateResponse, TagTopicsResponse, Topic, TopicResponse } from './discourse-models';
+import { PostCreateResponse, TagTopicsResponse, Topic, TopicPostsResponse, TopicResponse } from './discourse-models';
 
 const formatDistanceLocale = { xSeconds: '{{count}} sec', xMinutes: '{{count}} min', xHours: '{{count}} h', xDays: '{{count}} d' };
 const shortEnLocale: Locale = { formatDistance: (token, count) => formatDistanceLocale[token].replace('{{count}}', count) };
 
 export interface TopicEntry {
 	topic: Topic;
-	detail: Observable<TopicResponse>;
+	detail: Observable<TopicPostsResponse>;
 }
 
 @Component({
@@ -127,7 +127,7 @@ export class ServerReviewsComponent implements OnInit {
 	}
 
 	get myPlaytime() {
-		return this.playtimes[this.myId] || 0;
+		return this.playtimes[`fivem:${this.myId}`] || 0;
 	}
 
 	get projectName() {
@@ -138,7 +138,7 @@ export class ServerReviewsComponent implements OnInit {
 		const mapFn = (response: TagTopicsResponse) => {
 			return response.topic_list.topics.map(topic => ({
 				topic,
-				detail: this.fetchTopic(topic.id)
+				detail: this.fetchTopicPosts(topic.id)
 			}));
 		}
 
@@ -183,8 +183,8 @@ export class ServerReviewsComponent implements OnInit {
 			.pipe(catchError(_ => this.topicCatch()));
 	}
 
-	private fetchTopic(id: number) {
-		return this.discourse.apiCallObservable<TopicResponse>(`/t/${id}.json`);
+	private fetchTopicPosts(topicId: number) {
+		return this.discourse.apiCallObservable<TopicPostsResponse>(`/t/${topicId}/posts.json`);
 	}
 
 	reviewTrack(_: number, row: TopicEntry) {

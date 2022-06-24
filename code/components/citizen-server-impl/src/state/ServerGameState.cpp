@@ -38,10 +38,13 @@
 #include <citizen_util/shared_reference.h>
 
 #ifdef STATE_FIVE
-static constexpr int g_netObjectTypeBitLength = 4;
+static constexpr int kNetObjectTypeBitLength = 4;
 #elif defined(STATE_RDR3)
-static constexpr int g_netObjectTypeBitLength = 5;
+static constexpr int kNetObjectTypeBitLength = 5;
 #endif
+
+static constexpr int kSyncPacketMaxLength = 2400;
+static constexpr int kPacketWarnLength = 1300;
 
 namespace rl
 {
@@ -53,6 +56,22 @@ namespace rl
 
 CPool<fx::ScriptGuid>* g_scriptHandlePool;
 std::shared_mutex g_scriptHandlePoolMutex;
+
+enum class RequestControlFilterMode : int
+{
+	// Default is currently equivalent to FilterPlayer
+	Default = -1,
+	// NoFilter will not filter any control requests
+	NoFilter = 0,
+	// FilterPlayerSettled will filter control requests targeting player-controlled settled entities
+	FilterPlayerSettled,
+	// FilterPlayer will filter control requests targeting any player-controlled entities
+	FilterPlayer,
+	// FilterPlayerPlusNonPlayerSettled will filter control requests targeting player-controlled entities, or settled entities
+	FilterPlayerPlusNonPlayerSettled,
+	// FilterAll will filter all control requests, i.e. allow none
+	FilterAll,
+};
 
 std::shared_ptr<ConVar<bool>> g_oneSyncEnabledVar;
 std::shared_ptr<ConVar<bool>> g_oneSyncCulling;
@@ -66,6 +85,12 @@ std::shared_ptr<ConVar<bool>> g_oneSyncLengthHack;
 std::shared_ptr<ConVar<fx::OneSyncState>> g_oneSyncVar;
 std::shared_ptr<ConVar<bool>> g_oneSyncPopulation;
 std::shared_ptr<ConVar<bool>> g_oneSyncARQ;
+
+static std::shared_ptr<ConVar<int>> g_requestControlVar;
+static std::shared_ptr<ConVar<int>> g_requestControlSettleVar;
+
+static RequestControlFilterMode g_requestControlFilterState;
+static int g_requestControlSettleDelay;
 
 static uint32_t MakeHandleUniqifierPair(uint16_t objectId, uint16_t uniqifier)
 {
@@ -593,7 +618,10 @@ FocusResult GetPlayerFocusPos(const fx::sync::SyncEntityPtr& entity)
 ServerGameState::ServerGameState()
 	: m_frameIndex(1), m_entitiesById(MaxObjectId), m_entityLockdownMode(EntityLockdownMode::Inactive)
 {
+#ifdef USE_ASYNC_SCL_POSTING
 	m_tg = std::make_unique<ThreadPool>();
+#endif
+
 	fx::g_serverGameState = this;
 }
 
@@ -695,10 +723,16 @@ static void FlushBuffer(rl::MessageBuffer& buffer, uint32_t msgType, uint64_t fr
 		*(uint32_t*)(outData.data()) = msgType;
 		*(uint64_t*)(outData.data() + 4) = newFrame.full;
 
-		net::Buffer netBuffer(reinterpret_cast<uint8_t*>(outData.data()), len + 4 + 8);
-		netBuffer.Seek(len + 4 + 8); // since the buffer constructor doesn't actually set the offset
+		int bufferLen = len + 4 + 8;
+		net::Buffer netBuffer(reinterpret_cast<uint8_t*>(outData.data()), bufferLen);
+		netBuffer.Seek(bufferLen); // since the buffer constructor doesn't actually set the offset
 
-		GS_LOG("flushBuffer: sending %d bytes to %d\n", len + 4 + 8, client->GetNetId());
+	    if (bufferLen >= kPacketWarnLength)
+		{
+			console::DPrintf("net", "Sending a large packet (%d compressed bytes) to client %d, report if there will be any sync issues\n", bufferLen, client->GetNetId());
+		}
+
+		GS_LOG("flushBuffer: sending %d bytes to %d\n", bufferLen, client->GetNetId());
 
 		client->SendPacket(1, netBuffer, NetPacketType_Unreliable);
 
@@ -1462,7 +1496,7 @@ void ServerGameState::Tick(fx::ServerInstanceBase* instance)
 
 			if (entity)
 			{
-				if (auto stateBag = entity->stateBag)
+				if (auto stateBag = entity->GetStateBag())
 				{
 					stateBag->RemoveRoutingTarget(slotId);
 				}
@@ -1682,7 +1716,7 @@ void ServerGameState::Tick(fx::ServerInstanceBase* instance)
 					syncData.nextSync = curTime + syncData.syncDelta;
 				}
 
-				if (auto stateBag = entity->stateBag)
+				if (auto stateBag = entity->GetStateBag())
 				{
 					stateBag->AddRoutingTarget(slotId);
 				}
@@ -1723,7 +1757,7 @@ void ServerGameState::Tick(fx::ServerInstanceBase* instance)
 						preCb(frameIndex, isFirstFrameUpdate);
 
 						// create a buffer once (per thread) to save allocations
-						static thread_local rl::MessageBuffer mb(1200);
+						static thread_local rl::MessageBuffer mb(kSyncPacketMaxLength);
 
 						mb.SetCurrentBit(0);
 
@@ -1784,7 +1818,7 @@ void ServerGameState::Tick(fx::ServerInstanceBase* instance)
 
 							if (syncType == 1)
 							{
-								cmdState.cloneBuffer.Write(g_netObjectTypeBitLength, (uint8_t)entity->type);
+								cmdState.cloneBuffer.Write(kNetObjectTypeBitLength, (uint8_t)entity->type);
 								cmdState.cloneBuffer.Write(32, entity->creationToken);
 							}
 
@@ -2421,15 +2455,15 @@ void ServerGameState::ReassignEntity(uint32_t entityHandle, const fx::ClientShar
 		entity->GetLastOwnerUnsafe() = oldClientRef;
 		entity->GetClientUnsafe() = targetClient;
 		
-		if (entity->stateBag)
+		if (auto stateBag = entity->GetStateBag())
 		{
 			if (targetClient)
 			{
-				entity->stateBag->SetOwningPeer(targetClient->GetSlotId());
+				stateBag->SetOwningPeer(targetClient->GetSlotId());
 			}
 			else
 			{
-				entity->stateBag->SetOwningPeer(-1);
+				stateBag->SetOwningPeer(-1);
 			}
 		}
 
@@ -3013,6 +3047,7 @@ auto ServerGameState::CreateEntityFromTree(sync::NetObjEntityType type, const st
 	entity->handle = MakeEntityHandle(id);
 	entity->uniqifier = rand();
 	entity->creationToken = msec().count();
+	entity->createdAt = msec();
 	entity->passedFilter = true;
 
 	entity->syncTree = tree;
@@ -3059,7 +3094,7 @@ bool ServerGameState::ProcessClonePacket(const fx::ClientSharedPtr& client, rl::
 	{
 		creationToken = inPacket.Read<uint32_t>(32);
 
-		objectType = (sync::NetObjEntityType)inPacket.Read<uint8_t>(g_netObjectTypeBitLength);
+		objectType = (sync::NetObjEntityType)inPacket.Read<uint8_t>(kNetObjectTypeBitLength);
 	}
 
 	auto length = inPacket.Read<uint16_t>(12);
@@ -3112,6 +3147,7 @@ bool ServerGameState::ProcessClonePacket(const fx::ClientSharedPtr& client, rl::
 			entity->uniqifier = uniqifier;
 			entity->creationToken = creationToken;
 			entity->syncTree = MakeSyncTree(objectType);
+			entity->createdAt = msec();
 
 			// no sync tree -> invalid object type -> nah
 			if (!entity->syncTree)
@@ -3387,9 +3423,9 @@ bool ServerGameState::ProcessClonePacket(const fx::ClientSharedPtr& client, rl::
 		data->pendingCreates.erase(MakeHandleUniqifierPair(objectId, uniqifier));
 	}
 
-	if (entity->stateBag)
+	if (auto stateBag = entity->GetStateBag())
 	{
-		entity->stateBag->AddRoutingTarget(slotId);
+		stateBag->AddRoutingTarget(slotId);
 	}
 
 	return true;
@@ -3997,6 +4033,16 @@ void ServerGameState::SendPacket(int peer, std::string_view data)
 	}
 }
 
+bool ServerGameState::IsAsynchronous()
+{
+	return true;
+}
+
+void ServerGameState::QueueTask(std::function<void()>&& task)
+{
+	gscomms_execute_callback_on_main_thread(task);
+}
+
 ServerGameState::ArrayHandlerData::ArrayHandlerData()
 {
 #ifdef STATE_FIVE
@@ -4143,7 +4189,9 @@ struct CFireEvent
 	struct fire
 	{
 		int v1;
+		bool isEntity;
 		bool v2;
+		uint16_t entityGlobalId;
 		uint16_t v3;
 		bool v4;
 		float v5X;
@@ -4158,10 +4206,11 @@ struct CFireEvent
 		float v10;
 		float v11;
 		bool v12;
+		int weaponHash;
 		int v13;
 		uint16_t fireId;
 
-		MSGPACK_DEFINE_MAP(v1,v2,v3,v4,v5X,v5Y,v5Z,posX,posY,posZ,v7,v8,maxChildren,v10,v11,v12,v13,fireId);
+		MSGPACK_DEFINE_MAP(v1,isEntity,v2,entityGlobalId,v3,v4,v5X,v5Y,v5Z,posX,posY,posZ,v7,v8,maxChildren,v10,v11,v12,weaponHash, v13,fireId);
 	};
 
 	std::vector<fire> fires;
@@ -4179,11 +4228,18 @@ void CFireEvent::Parse(rl::MessageBuffer& buffer)
 	{
 		fire f;
 		f.v1 = buffer.Read<int>(4);
-		f.v2 = buffer.Read<uint8_t>(1);
-		if (f.v2)
-			f.v3 = buffer.Read<uint16_t>(13);
+		f.isEntity = buffer.Read<uint8_t>(1);
+		f.v2 = f.isEntity;
+		if (f.isEntity)
+		{
+			f.entityGlobalId = buffer.Read<uint16_t>(13);
+			f.v3 = f.entityGlobalId;
+		}
 		else
+		{
+			f.entityGlobalId = 0;
 			f.v3 = 0;
+		}
 		if (buffer.Read<uint8_t>(1))
 		{
 			f.v5X = buffer.ReadSignedFloat(19, 27648.0f);
@@ -4204,10 +4260,15 @@ void CFireEvent::Parse(rl::MessageBuffer& buffer)
 		f.maxChildren = buffer.Read<uint8_t>(5);
 		f.v10 = (buffer.Read<int>(16) / 65535.0f) * 90.0f;
 		f.v11 = (buffer.Read<int>(16) / 65535.0f) * 25.0f;
-		if (buffer.Read<uint8_t>(1))
-			f.v13 = buffer.Read<int>(32);
+		if (buffer.Read<uint8_t>(1)) {
+			f.weaponHash = buffer.Read<int>(32);
+			f.v13 = f.weaponHash;
+		}
 		else
+		{
+			f.weaponHash = 0;
 			f.v13 = 0;
+		}
 		f.fireId = buffer.Read<uint16_t>(16);
 		fires.push_back(f);
 	}
@@ -4331,9 +4392,111 @@ void CExplosionEvent::Parse(rl::MessageBuffer& buffer)
 	}
 }
 
+/*NETEV weaponDamageEvent SERVER
+/#*
+ * Triggered when a client wants to apply damage to a remotely-owned entity. This event can be canceled.
+ *
+ * @param sender - The server-side player ID of the player that triggered the event.
+ * @param data - The event data.
+ #/
+declare function weaponDamageEvent(sender: number, data: {
+	/#*
+	 * A value (between 0 and 3) containing an internal damage type.
+	 * Specific values are currently unknown.
+	 #/
+	damageType: number,
+
+	/#*
+	 * The weapon hash for the inflicted damage.
+	 #/
+	weaponType: number,
+
+	/#*
+	 * If set, 'weaponDamage' is valid. If unset, the game infers the damage from weapon metadata.
+	 #/
+	overrideDefaultDamage: boolean,
+
+	/#*
+	 * Whether the damage should be inflicted as if it hit the weapon the entity is carrying.
+	 * This likely applies to grenades being hit, which should explode, but also normal weapons, which should not harm the player much.
+	 #/
+	hitEntityWeapon: boolean,
+
+	/#*
+	 * Whether the damage should be inflicted as if it hit an ammo attachment component on the weapon.
+	 * This applies to players/peds carrying weapons where another player shooting the ammo component makes the weapon explode.
+	 #/
+	hitWeaponAmmoAttachment: boolean,
+
+	/#*
+	 * Set when the damage is applied using a silenced weapon.
+	 #/
+	silenced: boolean,
+
+	damageFlags: number,
+	hasActionResult: boolean,
+
+	actionResultName: number,
+	actionResultId: number,
+	f104: number,
+
+	/#*
+	 * The amount of damage inflicted, if `overrideDefaultDamage` is set. If not, this value is set to `0`.
+	 #/
+	weaponDamage: number,
+
+	isNetTargetPos: boolean,
+
+	localPosX: number,
+	localPosY: number,
+	localPosZ: number,
+
+	f112: boolean,
+
+	/#*
+	 * The timestamp the damage was originally inflicted at. This should match the global network timer.
+	 #/
+	damageTime: number,
+
+	/#*
+	 * Whether the originating client thinks this should be instantly-lethal damage, such as a critical headshot.
+	 #/
+	willKill: boolean,
+
+	f120: number,
+	hasVehicleData: boolean,
+
+	f112_1: number,
+
+	parentGlobalId: number,
+
+	/#*
+	 * The network ID of the victim entity.
+	 #/
+	hitGlobalId: number,
+
+	/#*
+	 * An array containing network IDs of victim entities. If there is more than one, the first one will be set in `hitGlobalId`.
+	 #/
+	hitGlobalIds: number[],
+
+	tyreIndex: number,
+	suspensionIndex: number,
+	hitComponent: number,
+
+	f133: boolean,
+	hasImpactDir: boolean,
+
+	impactDirX: number,
+	impactDirY: number,
+	impactDirZ: number,
+}): void;
+*/
 struct CWeaponDamageEvent
 {
 	void Parse(rl::MessageBuffer& buffer);
+
+	void SetTargetPlayers(fx::ServerGameState* sgs, const std::vector<uint16_t>& targetPlayers);
 
 	inline std::string GetName()
 	{
@@ -4374,6 +4537,8 @@ struct CWeaponDamageEvent
 	uint16_t parentGlobalId; // Source entity?
 	uint16_t hitGlobalId; // Target entity?
 
+	std::vector<uint16_t> hitGlobalIds;
+
 	uint8_t tyreIndex;
 	uint8_t suspensionIndex;
 	uint8_t hitComponent;
@@ -4385,7 +4550,7 @@ struct CWeaponDamageEvent
 	float impactDirY;
 	float impactDirZ;
 
-	MSGPACK_DEFINE_MAP(damageType, weaponType, overrideDefaultDamage, hitEntityWeapon, hitWeaponAmmoAttachment, silenced, damageFlags, hasActionResult, actionResultName, actionResultId, f104, weaponDamage, isNetTargetPos, localPosX, localPosY, localPosZ, f112, damageTime, willKill, f120, hasVehicleData, f112_1, parentGlobalId, hitGlobalId, tyreIndex, suspensionIndex, hitComponent, f133, hasImpactDir, impactDirX, impactDirY, impactDirZ);
+	MSGPACK_DEFINE_MAP(damageType, weaponType, overrideDefaultDamage, hitEntityWeapon, hitWeaponAmmoAttachment, silenced, damageFlags, hasActionResult, actionResultName, actionResultId, f104, weaponDamage, isNetTargetPos, localPosX, localPosY, localPosZ, f112, damageTime, willKill, f120, hasVehicleData, f112_1, parentGlobalId, hitGlobalId, tyreIndex, suspensionIndex, hitComponent, f133, hasImpactDir, impactDirX, impactDirY, impactDirZ, hitGlobalIds);
 };
 
 void CWeaponDamageEvent::Parse(rl::MessageBuffer& buffer)
@@ -4499,6 +4664,48 @@ void CWeaponDamageEvent::Parse(rl::MessageBuffer& buffer)
 		impactDirX = buffer.ReadSignedFloat(16, 6.2831854820251f);  // divisor: 0x40C90FDB
 		impactDirY = buffer.ReadSignedFloat(16, 6.2831854820251f);
 		impactDirZ = buffer.ReadSignedFloat(16, 6.2831854820251f);
+	}
+}
+
+void CWeaponDamageEvent::SetTargetPlayers(fx::ServerGameState* sgs, const std::vector<uint16_t>& targetPlayers)
+{
+	if (hitGlobalId == 0)
+	{
+		if (!targetPlayers.empty())
+		{
+			auto instance = sgs->GetServerInstance();
+			auto clientRegistry = instance->GetComponent<fx::ClientRegistry>();
+
+			for (uint16_t player : targetPlayers)
+			{
+				if (auto client = clientRegistry->GetClientByNetID(player))
+				{
+					auto clientDataUnlocked = GetClientDataUnlocked(sgs, client);
+
+					fx::sync::SyncEntityPtr playerEntity;
+					{
+						std::shared_lock _lock(clientDataUnlocked->playerEntityMutex);
+						playerEntity = clientDataUnlocked->playerEntity.lock();
+					}
+
+					if (playerEntity)
+					{
+						uint16_t objectId = playerEntity->handle & 0xFFFF;
+
+						if (hitGlobalId == 0)
+						{
+							hitGlobalId = objectId;
+						}
+
+						hitGlobalIds.push_back(objectId);
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		hitGlobalIds.push_back(hitGlobalId);
 	}
 }
 
@@ -4689,8 +4896,8 @@ struct CGiveWeaponEvent
     {
         pedId = buffer.Read<uint16_t>(13);
         weaponType = buffer.Read<uint32_t>(32);
-        unk1 = buffer.Read<uint8_t>(1);
-        ammo = buffer.Read<uint16_t>(15);
+        ammo = buffer.ReadSigned<int>(16);
+        unk1 = ammo < 0; // this used to represent the sign
         givenAsPickup = buffer.Read<uint8_t>(1);
     }
 
@@ -5078,24 +5285,54 @@ struct CNetworkPtFXEvent
 };
 #endif
 
-template<typename TEvent>
-inline auto GetHandler(fx::ServerInstanceBase* instance, const fx::ClientSharedPtr& client, net::Buffer&& buffer) -> std::function<bool()>
+inline bool ParseEvent(net::Buffer&& buffer, rl::MessageBuffer* outBuffer)
 {
 	uint16_t length = buffer.Read<uint16_t>();
 
 	if (length == 0)
 	{
-		return []() {
-			return false;
-		};
+		return false;
 	}
 
 	std::vector<uint8_t> data(length);
 	buffer.Read(data.data(), data.size());
 
-	rl::MessageBuffer msgBuf(data);
+	*outBuffer = rl::MessageBuffer{ std::move(data) };
+	return true;
+}
+
+template<typename TEvent>
+static constexpr auto HasTargetPlayerSetter(char)
+{
+	return false;
+}
+
+template<typename TEvent>
+static constexpr auto HasTargetPlayerSetter(int) -> decltype(std::is_same_v<decltype(std::declval<TEvent>().SetTargetPlayers(std::declval<fx::ServerGameState*>(), std::declval<const std::vector<uint16_t>&>())), void>)
+{
+	return true;
+}
+
+template<typename TEvent>
+inline auto GetHandler(fx::ServerInstanceBase* instance, const fx::ClientSharedPtr& client, net::Buffer&& buffer, const std::vector<uint16_t>& targetPlayers = {}) -> std::function<bool()>
+{
+	rl::MessageBuffer msgBuf;
+
+	if (!ParseEvent(std::move(buffer), &msgBuf))
+	{
+		return []()
+		{
+			return false;
+		};
+	}
+
 	auto ev = std::make_shared<TEvent>();
 	ev->Parse(msgBuf);
+
+	if constexpr (HasTargetPlayerSetter<TEvent>(0))
+	{
+		ev->SetTargetPlayers(instance->GetComponent<fx::ServerGameState>().GetRef(), targetPlayers);
+	}
 
 	return [instance, client, ev = std::move(ev)]()
 	{
@@ -5340,8 +5577,226 @@ enum GTA_EVENT_IDS
 #endif
 };
 
-static std::function<bool()> GetEventHandler(fx::ServerInstanceBase* instance, const fx::ClientSharedPtr& client, net::Buffer&& buffer)
+#ifdef STATE_FIVE
+namespace fx
 {
+template<RequestControlFilterMode Mode>
+inline bool RequestControlHandler(fx::ServerGameState* sgs, const fx::ClientSharedPtr& client, uint32_t objectId, const char** reason = nullptr)
+{
+	auto entity = sgs->GetEntity(0, objectId);
+
+	// nonexistent entities should be ignored, anyway
+	if (!entity)
+	{
+		if (reason)
+		{
+			*reason = "Entity doesn't exist";
+		}
+
+		return false;
+	}
+
+	// silly, but the game will ignore this anyway
+	if (entity->type == sync::NetObjEntityType::Player)
+	{
+		if (reason)
+		{
+			*reason = "Entity is a player";
+		}
+
+		return false;
+	}
+
+	// if the sender is strict, nope
+	if (sgs->GetEntityLockdownMode(client) == fx::EntityLockdownMode::Strict)
+	{
+		if (reason)
+		{
+			*reason = "Strict entity lockdown is active";
+		}
+
+		return false;
+	}
+
+	// if the sender isn't in the same bucket as the entity, nope either
+	{
+		auto clientData = GetClientDataUnlocked(sgs, client);
+		
+		if (clientData->routingBucket != entity->routingBucket)
+		{
+			if (reason)
+			{
+				*reason = "Entity is in a different routing bucket";
+			}
+
+			return false;
+		}
+	}
+
+	// if we need to, check if the entity is player-controlled
+	// for now, this means a vehicle that's occupied by a player.
+	// in the future, we could track e.g. attachment state or pending component control
+	bool playerControlled = false;
+
+	if constexpr (Mode == RequestControlFilterMode::FilterPlayer || Mode == RequestControlFilterMode::FilterPlayerSettled || Mode == RequestControlFilterMode::FilterPlayerPlusNonPlayerSettled)
+	{
+		// #TODO: turn this into a 'is this type a vehicle' helper
+		if (entity->type == sync::NetObjEntityType::Automobile || entity->type == sync::NetObjEntityType::Bike || entity->type == sync::NetObjEntityType::Boat || entity->type == sync::NetObjEntityType::Heli || entity->type == sync::NetObjEntityType::Plane || entity->type == sync::NetObjEntityType::Submarine || entity->type == sync::NetObjEntityType::Trailer ||
+#ifdef STATE_RDR3
+			entity->type == sync::NetObjEntityType::DraftVeh ||
+#endif
+			entity->type == sync::NetObjEntityType::Train)
+		{
+			if (auto syncTree = entity->syncTree)
+			{
+				auto vehicleData = entity->syncTree->GetVehicleGameState();
+				if (vehicleData->playerOccupants.any())
+				{
+					playerControlled = true;
+				}
+			}
+		}
+	}
+
+	// verify the entity's age, if needed
+	bool settled = false;
+
+	if constexpr (Mode == RequestControlFilterMode::FilterPlayerSettled || Mode == RequestControlFilterMode::FilterPlayerPlusNonPlayerSettled)
+	{
+		auto entityAge = msec() - entity->createdAt;
+		if (entityAge >= std::chrono::milliseconds{ g_requestControlSettleDelay })
+		{
+			settled = true;
+		}
+	}
+
+	// check the policy
+	if constexpr (Mode == RequestControlFilterMode::FilterPlayerPlusNonPlayerSettled)
+	{
+		if (playerControlled || settled)
+		{
+			if (reason)
+			{
+				if (playerControlled)
+				{
+					*reason = "Entity is controlled by a player";
+				}
+				else if (settled)
+				{
+					*reason = "Entity has been settled";
+				}
+			}
+
+			return false;
+		}
+	}
+	else if constexpr (Mode == RequestControlFilterMode::FilterPlayer)
+	{
+		if (playerControlled)
+		{
+			if (reason)
+			{
+				*reason = "Entity is controlled by a player";
+			}
+
+			return false;
+		}
+	}
+	else if constexpr (Mode == RequestControlFilterMode::FilterPlayerSettled)
+	{
+		if (playerControlled && settled)
+		{
+			if (reason)
+			{
+				*reason = "Entity is controlled by a player and has been settled";
+			}
+
+			return false;
+		}
+	}
+
+	// #whatever
+	return true;
+}
+}
+#endif
+
+std::function<bool()> fx::ServerGameState::GetRequestControlEventHandler(const fx::ClientSharedPtr& client, net::Buffer&& buffer)
+{
+#ifndef STATE_FIVE
+	return {};
+#else
+	if (g_requestControlFilterState == RequestControlFilterMode::NoFilter)
+	{
+		return {};
+	}
+	else if (g_requestControlFilterState == RequestControlFilterMode::FilterAll)
+	{
+		return []
+		{
+			return false;
+		};
+	}
+
+	uint32_t objectId = 0;
+	rl::MessageBuffer msg;
+
+	if (ParseEvent(std::move(buffer), &msg))
+	{
+		objectId = msg.Read<uint32_t>(13);
+	}
+
+	return [this, client, objectId]()
+	{
+		auto handler = []
+		{
+			switch (g_requestControlFilterState)
+			{
+				case RequestControlFilterMode::FilterPlayerPlusNonPlayerSettled:
+					return &fx::RequestControlHandler<RequestControlFilterMode::FilterPlayerPlusNonPlayerSettled>;
+				case RequestControlFilterMode::Default:
+				case RequestControlFilterMode::FilterPlayer:
+				default:
+					return &fx::RequestControlHandler<RequestControlFilterMode::FilterPlayer>;
+				case RequestControlFilterMode::FilterPlayerSettled:
+					return &fx::RequestControlHandler<RequestControlFilterMode::FilterPlayerSettled>;
+			}
+		}();
+
+		const char* reason = nullptr;
+		bool result = handler(this, client, objectId, &reason);
+
+		if (!result)
+		{
+			static std::chrono::milliseconds lastWarn{ -120 * 1000 };
+
+			if (g_requestControlFilterState == RequestControlFilterMode::Default)
+			{
+				auto now = msec();
+
+				if ((now - lastWarn) > std::chrono::seconds{ 120 })
+				{
+					console::PrintWarning("sync", "A client (slotID %d) tried to use NetworkRequestControlOfEntity (entity network ID %d), but it was rejected (%s).\n"
+												  "NetworkRequestControlOfEntity is deprecated, and should not be used because of potential abuse by cheaters. To disable this check, set \"sv_filterRequestControl\" \"0\".\n"
+												  "See https://aka.cfx.re/rcmitigation for more information.\n",
+					client->GetSlotId(),
+					objectId,
+					reason);
+
+					lastWarn = now;
+				}
+			}
+		}
+
+		return result;
+	};
+#endif
+}
+
+std::function<bool()> fx::ServerGameState::GetGameEventHandler(const fx::ClientSharedPtr& client, const std::vector<uint16_t>& targetPlayers, net::Buffer&& buffer)
+{
+	auto instance = m_instance;
+
 	buffer.Read<uint16_t>(); // eventHeader
 	bool isReply = buffer.Read<uint8_t>(); // is reply
 	uint16_t eventType = buffer.Read<uint16_t>(); // event ID
@@ -5350,6 +5805,11 @@ static std::function<bool()> GetEventHandler(fx::ServerInstanceBase* instance, c
 	if (Is2060() && eventType > 55) // patch for 1868+ game build as `NETWORK_AUDIO_BARK_EVENT` was added
 	{
 		eventType--;
+	}
+
+	if (eventType == REQUEST_CONTROL_EVENT)
+	{
+		return GetRequestControlEventHandler(client, std::move(buffer));
 	}
 
 	if (isReply)
@@ -5369,7 +5829,7 @@ static std::function<bool()> GetEventHandler(fx::ServerInstanceBase* instance, c
 
 	switch(eventType)
 	{
-		case WEAPON_DAMAGE_EVENT: return GetHandler<CWeaponDamageEvent>(instance, client, std::move(buffer));
+		case WEAPON_DAMAGE_EVENT: return GetHandler<CWeaponDamageEvent>(instance, client, std::move(buffer), targetPlayers);
 		case RESPAWN_PLAYER_PED_EVENT: return GetHandler<CRespawnPlayerPedEvent>(instance, client, std::move(buffer));
 		case GIVE_WEAPON_EVENT: return GetHandler<CGiveWeaponEvent>(instance, client, std::move(buffer));
 		case REMOVE_WEAPON_EVENT: return GetHandler<CRemoveWeaponEvent>(instance, client, std::move(buffer));
@@ -5397,6 +5857,9 @@ static InitFunction initFunction([]()
 		{
 			return;
 		}
+
+		g_requestControlVar = instance->AddVariable<int>("sv_filterRequestControl", ConVar_None, (int)RequestControlFilterMode::NoFilter, (int*)&g_requestControlFilterState);
+		g_requestControlSettleVar = instance->AddVariable<int>("sv_filterRequestControlSettleTimer", ConVar_None, 30000, &g_requestControlSettleDelay);
 
 		fx::SetOneSyncGetCallback([]()
 		{
@@ -5520,7 +5983,7 @@ static InitFunction initFunction([]()
 			auto copyBuf = netBuffer.Clone();
 			copyBuf.Seek(6);
 
-			auto eventHandler = GetEventHandler(instance, client, std::move(copyBuf));
+			auto eventHandler = sgs->GetGameEventHandler(client, targetPlayers, std::move(copyBuf));
 
 			if (eventHandler)
 			{

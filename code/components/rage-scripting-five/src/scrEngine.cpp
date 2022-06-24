@@ -556,9 +556,31 @@ static void StartupScriptWrap()
 	origStartupScript();
 }
 
+static InitFunction initFunction([]
+{
+	if (xbr::IsGameBuildOrGreater<2612>())
+	{
+		// IS_BIT_SET is missing in b2612+, re-adding for compatibility
+		rage::scrEngine::RegisterNativeHandler(0xE2D0C323A1AE5D85 /* 2545 hash */, [](rage::scrNativeCallContext* ctx)
+		{
+			bool result = false;
+
+			auto value = ctx->GetArgument<uint32_t>(0);
+			auto offset = ctx->GetArgument<int>(1);
+
+			if (offset < 32)
+			{
+				result = (value & (1 << offset)) != 0;
+			}
+
+			ctx->SetResult<int>(0, result);
+		});
+	}
+});
+
 static HookFunction hookFunction([] ()
 {
-	char* location = hook::pattern("48 8B C8 EB 03 48 8B CB 48 8B 05").count(1).get(0).get<char>(11);
+	char* location = xbr::IsGameBuildOrGreater<2545>() ? hook::pattern("48 8B C8 EB 03 49 8B CD 48 8B 05").count(1).get(0).get<char>(11) : hook::pattern("48 8B C8 EB 03 48 8B CB 48 8B 05").count(1).get(0).get<char>(11);
 
 	scrThreadCollection = reinterpret_cast<decltype(scrThreadCollection)>(location + *(int32_t*)location + 4);
 
@@ -575,7 +597,15 @@ static HookFunction hookFunction([] ()
 	}
 	else
 	{
-		if (xbr::IsGameBuildOrGreater<2372>())
+		if (xbr::IsGameBuildOrGreater<2612>())
+		{
+			scrThreadId = hook::get_address<uint32_t*>(hook::get_pattern("8B 15 ? ? ? ? 48 8B 05 ? ? ? ? FF C2 89 15 ? ? ? ? 48 8B 0C D8", 2));
+		}
+		else if (xbr::IsGameBuildOrGreater<2545>())
+		{
+			scrThreadId = hook::get_address<uint32_t*>(hook::get_pattern("8B 15 ? ? ? ? 48 8B 05 ? ? ? ? FF C2 89 15 ? ? ? ? E9", 2));
+		}
+		else if (xbr::IsGameBuildOrGreater<2372>())
 		{
 			scrThreadId = hook::get_address<uint32_t*>(hook::get_pattern("8B 15 ? ? ? ? 48 8B 05 ? ? ? ? FF C2 89", 2));
 		}
@@ -585,7 +615,7 @@ static HookFunction hookFunction([] ()
 			scrThreadId = hook::get_address<uint32_t*>(hook::get_pattern("33 FF 48 85 C0 74 08 48 8B C8 E8", -9)) - 2;
 		}
 
-		location = hook::get_pattern<char>("FF 0D ? ? ? ? 48 8B F9", 2);
+		location = xbr::IsGameBuildOrGreater<2545>() ? hook::get_pattern<char>("FF 0D ? ? ? ? 48 8B D9 75", 2) : hook::get_pattern<char>("FF 0D ? ? ? ? 48 8B F9", 2);
 
 		scrThreadCount = reinterpret_cast<decltype(scrThreadCount)>(location + *(int32_t*)location + 4);
 	}

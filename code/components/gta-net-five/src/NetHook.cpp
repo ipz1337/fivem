@@ -319,6 +319,16 @@ static hook::cdecl_stub<void(int, int, int)> hostGame([] () -> void*
 		return (void*)hook::get_adjusted(0x1410646BC);
 	}
 
+	if (xbr::IsGameBuild<2545>())
+	{
+		return (void*)hook::get_adjusted(0x14106FF30);
+	}
+	
+	if (xbr::IsGameBuild<2612>())
+	{
+		return (void*)hook::get_adjusted(0x141071468);
+	}
+
 	// 1737
 	//return (void*)0x141029A20;
 
@@ -1322,45 +1332,7 @@ static void(*_origLoadMeta)(const char*, bool, uint32_t);
 
 static void WaitForScAndLoadMeta(const char* fn, bool a2, uint32_t a3)
 {
-	while (_isScWaitingForInit())
-	{
-		// 1365
-		// 1493
-		// 1604
-		// 1737
-		// 1868
-		// 2060
-		if (xbr::IsGameBuildOrGreater<2372>())
-		{
-			((void (*)())hook::get_adjusted(0x140006718))();
-			((void (*)())hook::get_adjusted(0x1407F6050))();
-			((void (*)())hook::get_adjusted(0x1400263CC))();
-			((void (*)(void*))hook::get_adjusted(0x14160104C))((void*)hook::get_adjusted(0x142E34900));
-		}
-		else if (!xbr::IsGameBuildOrGreater<2060>())
-		{
-			((void(*)())hook::get_adjusted(0x1400067E8))();
-			((void(*)())hook::get_adjusted(0x1407D1960))();
-			((void(*)())hook::get_adjusted(0x140025F7C))();
-			((void(*)(void*))hook::get_adjusted(0x141595FD4))((void*)hook::get_adjusted(0x142DC9BA0));
-		}
-		else if (xbr::IsGameBuildOrGreater<2189>())
-		{
-			((void (*)())hook::get_adjusted(0x140006748))();
-			((void (*)())hook::get_adjusted(0x1407F4150))();
-			((void (*)())hook::get_adjusted(0x140026120))();
-			((void (*)(void*))hook::get_adjusted(0x1415E4AC8))((void*)hook::get_adjusted(0x142E5C2D0));
-		}
-		else
-		{
-			((void (*)())hook::get_adjusted(0x140006A80))();
-			((void (*)())hook::get_adjusted(0x1407EB39C))();
-			((void (*)())hook::get_adjusted(0x1400263A4))();
-			((void (*)(void*))hook::get_adjusted(0x1415CF268))((void*)hook::get_adjusted(0x142D3DCC0));
-		}
-
-		Sleep(0);
-	}
+	WaitForRlInit();
 
 	return _origLoadMeta(fn, a2, a3);
 }
@@ -1400,7 +1372,10 @@ static void ExitCleanly()
 static BOOL ShellExecuteExAHook(SHELLEXECUTEINFOA *pExecInfo)
 {
 	static HostSharedData<CfxState> hostData("CfxInitState");
-	auto cli = const_cast<wchar_t*>(va(L"\"%s\" %s -switchcl", hostData->gameExePath, ToWide(pExecInfo->lpParameters)));
+	auto cli = const_cast<wchar_t*>(va(L"\"%s\" %s -switchcl", hostData->gameExePath, ToWide(
+		pExecInfo->lpParameters ?
+			pExecInfo->lpParameters : ""
+	)));
 
 	STARTUPINFOW si = { 0 };
 	si.cb = sizeof(si);
@@ -1411,8 +1386,31 @@ static BOOL ShellExecuteExAHook(SHELLEXECUTEINFOA *pExecInfo)
 	return TRUE;
 }
 
+static int* g_clipsetManager_networkState;
+static void (*g_orig_fwClipSetManager_StartNetworkSession)();
+
+static void fwClipSetManager_StartNetworkSessionHook()
+{
+	if (*g_clipsetManager_networkState != 2)
+	{
+		g_orig_fwClipSetManager_StartNetworkSession();
+	}
+}
+
+static void (*g_origPoliceScanner_Stop)(void*, int);
+
+static void PoliceScanner_StopWrap(void* self, int a2)
+{
+	if (!isSessionStarted())
+	{
+		g_origPoliceScanner_Stop(self, a2);
+	}
+}
+
 static HookFunction hookFunction([] ()
 {
+	MH_Initialize();
+
 	static ConsoleCommand quitCommand("quit", [](const std::string& message)
 	{
 		g_quitMsg = message;
@@ -1424,7 +1422,6 @@ static HookFunction hookFunction([] ()
 
 	// no netgame jumpouts in alt-f4
 	hook::put<uint8_t>(hook::get_pattern("40 38 35 ? ? ? ? 74 0A 48 8B CF", 7), 0xEB);
-	hook::put<uint8_t>(hook::get_pattern("40 38 35 ? ? ? ? 74 0A E8 ? ? ? ? E9", 7), 0xEB);
 
 	// fix 'restart' handling to not ask MTL to restart, but relaunch 'ourselves' (eg on settings change)
 	hook::put<uint8_t>(hook::get_pattern("48 85 C9 74 15 40 38 31 74", 3), 0xEB);
@@ -1539,8 +1536,8 @@ static HookFunction hookFunction([] ()
 
 		onlineAddressFunc = hook::get_call(netAddressFunc + 0x2D);
 		
-		char* netUnkFunc = hook::get_pattern<char>("48 8D 0D ? ? ? ? 48 8D 14 03");
-		bool* didNetAddressBool = hook::get_address<bool*>(netUnkFunc + 0x19);
+		char* rlCreateUUID = hook::get_pattern<char>("48 8D 0D ? ? ? ? 48 8D 14 03", -0x31);
+		bool* didNetAddressBool = hook::get_address<bool*>(rlCreateUUID + 0x48, 2, 7);
 		*didNetAddressBool = true;
 
 		hook::call(sessionKeyAddress, GetOurSessionKeyWrap);
@@ -1664,12 +1661,12 @@ static HookFunction hookFunction([] ()
 		hook::return_function(hook::get_pattern("48 8D 0D ? ? ? ? E8 ? ? ? ? 48 83 3D ? ? ? ? FF 74", -16));
 	}
 
-	// don't switch clipset manager to network mode
+	// don't redundantly switch clipset manager to network mode
 	// (blocks on a LoadAllObjectsNow after scene has initialized already)
-	if (!xbr::IsGameBuildOrGreater<2060>()) // arxan
-	{
-		hook::nop(hook::get_pattern("84 C0 75 33 E8 ? ? ? ? 83", 4), 5);
-	}
+	g_clipsetManager_networkState =
+		hook::get_address<int*>(hook::get_pattern("0F 85 6B FF FF FF C7 05", 6), 2, 10);
+	MH_CreateHook(hook::get_pattern("83 E1 02 74 34 A8 04 75", -0x36),
+		fwClipSetManager_StartNetworkSessionHook, (void**)&g_orig_fwClipSetManager_StartNetworkSession);
 
 	// don't switch to SP mode either
 	hook::return_function(hook::get_pattern("48 8D 2D ? ? ? ? 8B F0 85 C0 0F", -0x15));
@@ -1679,7 +1676,6 @@ static HookFunction hookFunction([] ()
 	hook::put<uint8_t>(hook::get_pattern("F6 44 07 04 02 74 7A", 4), 4); // check persistent sp flag -> persistent mp
 
 	// exitprocess -> terminateprocess
-	MH_Initialize();
 	MH_CreateHookApi(L"kernel32.dll", "ExitProcess", ExitProcessReplacement, nullptr);
 	MH_EnableHook(MH_ALL_HOOKS);
 
@@ -1748,6 +1744,8 @@ static HookFunction hookFunction([] ()
 		hook::set_call(&_isScWaitingForInit, location);
 		hook::call(location, ReturnFalse);
 
+		SetScInitWaitCallback(_isScWaitingForInit);
+
 		void(*_processEntitlements)();
 		hook::set_call(&_processEntitlements, location - 50);
 
@@ -1801,6 +1799,13 @@ static HookFunction hookFunction([] ()
 		auto location = hook::get_pattern("0F 85 ? ? ? ? 33 DB 38 1D ? ? ? ? 75", -0x14);
 		MH_CreateHook(location, BeforeReplayLoadHook, (void**)&g_origBeforeReplayLoad);
 		MH_EnableHook(MH_ALL_HOOKS);
+	}
+
+	// don't stop police scanner reports when changing time in a networked game (really?)
+	{
+		auto location = hook::get_pattern("48 8D 0D ? ? ? ? 33 D2 E8 ? ? ? ? 48 8B 05 ? ? ? ? 48 8B 48 08", 9);
+		hook::set_call(&g_origPoliceScanner_Stop, location);
+		hook::call(location, PoliceScanner_StopWrap);
 	}
 
 	// default netnoupnp and netnopcp to true

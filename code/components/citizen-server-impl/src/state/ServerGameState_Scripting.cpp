@@ -1243,7 +1243,7 @@ static void Init()
 
 	fx::ScriptEngine::RegisterNativeHandler("ENSURE_ENTITY_STATE_BAG", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
 	{
-		if (!entity->stateBag)
+		if (!entity->HasStateBag())
 		{
 			// get the current resource manager
 			auto resourceManager = fx::ResourceManager::GetCurrent();
@@ -1253,7 +1253,7 @@ static void Init()
 
 			// get the server's game state
 			auto gameState = instance->GetComponent<fx::ServerGameState>();
-			entity->stateBag = gameState->GetStateBags()->RegisterStateBag(fmt::sprintf("entity:%d", entity->handle & 0xFFFF));
+			auto stateBag = gameState->GetStateBags()->RegisterStateBag(fmt::sprintf("entity:%d", entity->handle & 0xFFFF));
 
 			std::set<int> rts{ -1 };
 
@@ -1262,18 +1262,20 @@ static void Init()
 				rts.insert(i);
 			}
 
-			entity->stateBag->SetRoutingTargets(rts);
+			stateBag->SetRoutingTargets(rts);
 
 			auto client = entity->GetClient();
 
 			if (client)
 			{
-				entity->stateBag->SetOwningPeer(client->GetSlotId());
+				stateBag->SetOwningPeer(client->GetSlotId());
 			}
 			else
 			{
-				entity->stateBag->SetOwningPeer(-1);
+				stateBag->SetOwningPeer(-1);
 			}
+
+			entity->SetStateBag(std::move(stateBag));
 		}
 
 		return 0;
@@ -1632,6 +1634,49 @@ static void Init()
 		}
 
 		return speed;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_ENTITY_ATTACHED_TO", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		int handle = 0;
+
+		if (auto attachment = entity->syncTree->GetAttachment())
+		{
+			if (attachment->attached)
+			{
+				auto resman = fx::ResourceManager::GetCurrent();
+				auto instance = resman->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+				auto gameState = instance->GetComponent<fx::ServerGameState>();
+
+				if (auto entity = gameState->GetEntity(0, attachment->attachedTo))
+				{
+					handle = gameState->MakeScriptHandle(entity);
+				}
+			}
+		}
+
+		return handle;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_HELI_MAIN_ROTOR_HEALTH", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto heliHealth = entity->syncTree->GetHeliHealth();
+
+		return heliHealth ? float(heliHealth->mainRotorHealth) : 0.0f;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_HELI_TAIL_ROTOR_HEALTH", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto heliHealth = entity->syncTree->GetHeliHealth();
+
+		return heliHealth ? float(heliHealth->tailRotorHealth) : 0.0f;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_STEERING_ANGLE", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto steeringData = entity->syncTree->GetVehicleSteeringData();
+
+		return steeringData ? steeringData->steeringAngle * (180.0f / pi) : 0.0f;
 	}));
 }
 

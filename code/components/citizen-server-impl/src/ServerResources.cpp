@@ -4,6 +4,7 @@
 #include <ResourceEventComponent.h>
 #include <ResourceMetaDataComponent.h>
 #include <ResourceManagerConstraintsComponent.h>
+#include <ResourceScriptingComponent.h>
 
 #include <fxScripting.h>
 
@@ -813,7 +814,15 @@ static InitFunction initFunction([]()
 
 			if (resourceName[0] == '[' && resourceName[resourceName.size() - 1] == ']')
 			{
-				for (const auto& resource : g_resourcesByComponent[resourceName])
+				auto category = g_resourcesByComponent.find(resourceName);
+
+				if (category == g_resourcesByComponent.end())
+				{
+					trace("^3Couldn't find resource category %s.^7\n", resourceName);
+					return;
+				}
+
+				for (const auto& resource : category->second)
 				{
 					auto conCtx = instance->GetComponent<console::Context>();
 					conCtx->ExecuteSingleCommandDirect(ProgramArguments{ "start", resource });
@@ -849,7 +858,15 @@ static InitFunction initFunction([]()
 
 			if (resourceName[0] == '[' && resourceName[resourceName.size() - 1] == ']')
 			{
-				for (const auto& resource : g_resourcesByComponent[resourceName])
+				auto category = g_resourcesByComponent.find(resourceName);
+
+				if (category == g_resourcesByComponent.end())
+				{
+					trace("^3Couldn't find resource category %s.^7\n", resourceName);
+					return;
+				}
+
+				for (const auto& resource : category->second)
 				{
 					auto conCtx = instance->GetComponent<console::Context>();
 					conCtx->ExecuteSingleCommandDirect(ProgramArguments{ "stop", resource });
@@ -903,7 +920,15 @@ static InitFunction initFunction([]()
 		{
 			if (resourceName[0] == '[' && resourceName[resourceName.size() - 1] == ']')
 			{
-				for (const auto& resource : g_resourcesByComponent[resourceName])
+				auto category = g_resourcesByComponent.find(resourceName);
+
+				if (category == g_resourcesByComponent.end())
+				{
+					trace("^3Couldn't find resource category %s.^7\n", resourceName);
+					return;
+				}
+
+				for (const auto& resource : category->second)
 				{
 					auto conCtx = instance->GetComponent<console::Context>();
 					conCtx->ExecuteSingleCommandDirect(ProgramArguments{ "ensure", resource });
@@ -1231,7 +1256,9 @@ static InitFunction initFunction2([]()
 			if (resource.GetRef())
 			{
 				resource->GetManager()->MakeCurrent();
-				resource->Tick();
+
+				// #TODOTICKLESS: handle bookmark-based resources
+				resource->GetComponent<fx::ResourceScriptingComponent>()->Tick();
 			}
 		}, true);
 	});
